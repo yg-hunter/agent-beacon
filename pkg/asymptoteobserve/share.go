@@ -305,8 +305,8 @@ func ShareEventID(event Event) string {
 func BuildShareBundle(events []Event, opts ShareOptions) TraceBundleV1 {
 	if opts.WorkingDirectory == "" {
 		for _, event := range events {
-			if event.Session != nil && strings.TrimSpace(event.Session.WorkingDirectory) != "" {
-				opts.WorkingDirectory = strings.TrimSpace(event.Session.WorkingDirectory)
+			if event.Session != nil && event.Session.WorkingDirectory != "" {
+				opts.WorkingDirectory = event.Session.WorkingDirectory
 				break
 			}
 		}
@@ -422,7 +422,7 @@ func shareSummaryForPublication(summary *TraceSummaryV1, events []Event, opts Sh
 	var remote, branch, ref, project, workDir string
 	for _, event := range events {
 		if workDir == "" && event.Session != nil {
-			workDir = strings.TrimSpace(event.Session.WorkingDirectory)
+			workDir = event.Session.WorkingDirectory
 		}
 		if event.VCS != nil {
 			if event.VCS.Repository != nil && event.VCS.Repository.URL != nil && remote == "" {
@@ -490,7 +490,6 @@ func shareSummaryForPublication(summary *TraceSummaryV1, events []Event, opts Sh
 // shareProjectName is the last segment of a directory or repository name, unless it is the home
 // directory, whose name is the local account's.
 func shareProjectName(value, home string) string {
-	value = strings.TrimSpace(value)
 	if value == "" || samePath(value, home) {
 		return ""
 	}
@@ -551,7 +550,7 @@ type pathScrubber struct {
 
 func newPathScrubber(work, home string) pathScrubber {
 	clean := func(p string) string {
-		p = strings.TrimRight(strings.TrimSpace(p), `/\`)
+		p = strings.TrimRight(p, `/\`)
 		// A root or a single short segment would rewrite unrelated text.
 		if len(p) < 3 {
 			return ""
@@ -788,6 +787,9 @@ func ShareRemoteURL(raw string) string {
 			return ""
 		}
 		rest := raw[scheme+3:]
+		if cut := strings.IndexAny(rest, "?#"); cut >= 0 {
+			rest = rest[:cut]
+		}
 		host, path := rest, ""
 		if slash := strings.Index(rest, "/"); slash >= 0 {
 			host, path = rest[:slash], rest[slash:]
@@ -797,9 +799,6 @@ func ShareRemoteURL(raw string) string {
 		}
 		if host == "" {
 			return ""
-		}
-		if cut := strings.IndexAny(path, "?#"); cut >= 0 {
-			path = path[:cut]
 		}
 		return raw[:scheme+3] + host + path
 	}
@@ -830,12 +829,12 @@ func ShareBranch(name string) string {
 }
 
 func samePath(a, b string) bool {
-	a, b = strings.TrimRight(strings.TrimSpace(a), `/\`), strings.TrimRight(strings.TrimSpace(b), `/\`)
+	a, b = strings.TrimRight(a, `/\`), strings.TrimRight(b, `/\`)
 	return a != "" && a == b
 }
 
 func lastPathSegment(value string) string {
-	value = strings.TrimRight(strings.TrimSpace(value), `/\`)
+	value = strings.TrimRight(value, `/\`)
 	if i := strings.LastIndexAny(value, `/\:`); i >= 0 {
 		value = value[i+1:]
 	}

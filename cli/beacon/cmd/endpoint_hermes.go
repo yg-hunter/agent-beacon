@@ -43,12 +43,13 @@ var endpointHermesStatusCmd = &cobra.Command{
 }
 
 var endpointHermesOpts struct {
-	dbPath    string
-	statePath string
-	logPath   string
-	print     bool
-	watch     bool
-	interval  time.Duration
+	dbPath      string
+	statePath   string
+	logPath     string
+	print       bool
+	watch       bool
+	interval    time.Duration
+	rotateBytes int64
 }
 
 func init() {
@@ -59,7 +60,7 @@ func init() {
 	for _, c := range []*cobra.Command{endpointHermesSyncCmd, endpointHermesStatusCmd} {
 		f := c.Flags()
 		f.StringVar(&endpointHermesOpts.dbPath, "db", "", "Hermes state database (default $HERMES_HOME/state.db when set, otherwise the native Hermes data root)")
-		f.StringVar(&endpointHermesOpts.statePath, "state", "", "Collector cursor file (default ~/.beacon/endpoint/state/hermes.json for the native Hermes root, hermes-<profile>-<id>.json for any other home)")
+		f.StringVar(&endpointHermesOpts.statePath, "state", "", "Collector cursor file (default ~/.beacon/endpoint/state/hermes.json for the native Hermes root, hermes-<profile>-<id>.json for any other home); hermes-session-homes.json beside it records which home keeps each session's original event ids")
 		f.BoolVar(&endpointOpts.jsonOutput, "json", false, "Print the result as JSON")
 		f.BoolVar(&endpointOpts.userMode, "user", true, "Use per-user endpoint paths")
 		f.BoolVar(&endpointOpts.systemMode, "system", false, "Use system endpoint paths")
@@ -70,17 +71,22 @@ func init() {
 	sync.BoolVar(&endpointHermesOpts.print, "print", false, "Print mapped events as JSON without writing them or advancing the cursor (dry run)")
 	sync.BoolVar(&endpointHermesOpts.watch, "watch", false, "Sweep continuously on --interval (default: one sweep then exit)")
 	sync.DurationVar(&endpointHermesOpts.interval, "interval", time.Minute, "Sweep interval for --watch")
+	addSyncRotateBytesFlag(sync, &endpointHermesOpts.rotateBytes)
 }
 
 func runEndpointHermesSync(cmd *cobra.Command, args []string) error {
+	if err := checkSyncRotateBytes(endpointHermesOpts.rotateBytes); err != nil {
+		return err
+	}
 	userMode := endpointUserMode()
 	dbPath := resolveHermesDBPath(endpointHermesOpts.dbPath)
 	opts := hermessession.CollectOptions{
-		DBPath:   dbPath,
-		Print:    endpointHermesOpts.print,
-		Out:      cmd.OutOrStdout(),
-		Write:    !endpointHermesOpts.print,
-		UserMode: userMode,
+		RotateBytes: endpointHermesOpts.rotateBytes,
+		DBPath:      dbPath,
+		Print:       endpointHermesOpts.print,
+		Out:         cmd.OutOrStdout(),
+		Write:       !endpointHermesOpts.print,
+		UserMode:    userMode,
 	}
 	if !endpointHermesOpts.print {
 		opts.StatePath = resolveHermesStatePath(endpointHermesOpts.statePath, dbPath, userMode)
@@ -129,6 +135,7 @@ func reportHermesSweep(cmd *cobra.Command, summary hermessession.Summary) {
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Hermes sync: %d sessions, %d changed, %d events, %d errors\n",
 		summary.Sessions, summary.SessionsChanged, summary.EventsEmitted, summary.Errors)
+	reportSyncRetention(cmd.OutOrStdout(), summary.Retention)
 }
 
 type hermesSessionStatus struct {
@@ -140,6 +147,9 @@ type hermesSessionStatus struct {
 	LastMessageID      int64  `json:"last_message_id"`
 	CollectedMessageID int64  `json:"collected_message_id"`
 	Collected          bool   `json:"collected"`
+	// IDsKeyedByHome is set when this home keys the session's event ids by its own path, because
+	// another home, such as the profile it was cloned from, had already collected the same session id.
+	IDsKeyedByHome bool `json:"ids_keyed_by_home,omitempty"`
 }
 
 type hermesStatusReport struct {
@@ -195,6 +205,7 @@ func runEndpointHermesStatus(cmd *cobra.Command, args []string) error {
 		if cursor := state.Sessions[session.ID]; cursor != nil {
 			status.CollectedMessageID = cursor.LastMessageID
 			status.Collected = cursor.Started && cursor.LastMessageID >= lastID && (session.EndedAtMS == 0 || cursor.EndedAtMS == session.EndedAtMS)
+			status.IDsKeyedByHome = cursor.KeyedByHome
 		}
 		report.Sessions = append(report.Sessions, status)
 	}
@@ -211,6 +222,9 @@ func runEndpointHermesStatus(cmd *cobra.Command, args []string) error {
 		mark := "pending"
 		if session.Collected {
 			mark = "collected"
+		}
+		if session.IDsKeyedByHome {
+			mark += ", ids keyed by home"
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "- %s [%s] messages %d/%d %s\n",
 			session.SessionID, mark, session.CollectedMessageID, session.LastMessageID, session.Title)

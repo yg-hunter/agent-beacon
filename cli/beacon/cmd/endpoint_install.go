@@ -18,6 +18,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/writer"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/onboarding"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/version"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 	"github.com/spf13/cobra"
 )
 
@@ -133,6 +134,7 @@ func endpointInstallOptions(selection endpointTargetSelection, serviceKind servi
 		SplunkHEC:                 splunkHECOptions(),
 		FalconHEC:                 falconHECOptions(),
 		ServiceKind:               serviceKind,
+		LogAccess:                 strings.ToLower(strings.TrimSpace(endpointOpts.logAccess)),
 	}
 }
 
@@ -200,6 +202,7 @@ func runEndpointInstall(cmd *cobra.Command, args []string) error {
 	case result.InventoryJobDetail != "":
 		fmt.Fprintf(details, "Scheduled inventory job not installed: %s\n", result.InventoryJobDetail)
 	}
+	reportLogAccess(details, result)
 	reportManagedForwarder(details, cmd.ErrOrStderr(), result.ManagedForwarder)
 	printLingerGap(cmd.ErrOrStderr(), result)
 	installHookTargetsFromEndpointInstall(details, cmd.ErrOrStderr(), selection.Hooks)
@@ -353,10 +356,18 @@ func runEndpointStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Diagnostic: %s %s (%s)\n", check.Name, check.Status, check.Message)
 		}
 	}
-	if status.LastEvent == "" {
-		fmt.Println("Last event: none")
-	} else {
+	if status.LogAccess != "" {
+		fmt.Printf("Runtime log access: %s\n", status.LogAccess)
+	}
+	switch {
+	case status.LastEvent != "":
 		fmt.Println("Last event: present")
+	case status.LogAccess == asymptoteobserve.LogAccessRestricted && !readable(status.LogPath):
+		// A restricted log is unreadable to an account outside its readers group, which is not the
+		// same as empty.
+		fmt.Printf("Last event: unknown (this account cannot read the restricted log; run %s)\n", elevatedRunHint())
+	default:
+		fmt.Println("Last event: none")
 	}
 	for _, forwarder := range status.ScriptForwarders {
 		fmt.Println(scriptForwarderStatusLine(forwarder))
@@ -452,6 +463,7 @@ func runEndpointRepair(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	fmt.Printf("Endpoint repaired. Manifest: %s\n", result.ManifestPath)
+	reportLogAccess(os.Stdout, result)
 	reportManagedForwarder(os.Stdout, cmd.ErrOrStderr(), result.ManagedForwarder)
 	printLingerGap(cmd.ErrOrStderr(), result)
 	installHookTargetsFromEndpointInstall(os.Stdout, cmd.ErrOrStderr(), selection.Hooks)

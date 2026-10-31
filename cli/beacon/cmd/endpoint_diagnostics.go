@@ -34,6 +34,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/writer"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/sessionfs"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/version"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 )
 
 type doctorResult struct {
@@ -172,8 +173,17 @@ func buildDoctorResult(status lifecycle.Status, generatedAt time.Time) doctorRes
 		checks = append(checks, codexTokenAttributionCheck(status.LogPath, status.RuntimeLog.EffectiveUserMode))
 	}
 	if dshDetected {
-		if check, ok := doctorDshHookCaptureCheck(status.LogPath); ok {
+		bridgeUnavailable := false
+		if check, ok := doctorDshHookBridgeCheck(); ok {
 			checks = append(checks, check)
+			bridgeUnavailable = check.Evidence == "dsh_hook_bridge_unavailable"
+		}
+		// When dsh cannot load the bridge at all, every session runs without hook events and the
+		// capture check would blame the sandbox for it. The bridge check has already said why.
+		if !bridgeUnavailable {
+			if check, ok := doctorDshHookCaptureCheck(status.LogPath); ok {
+				checks = append(checks, check)
+			}
 		}
 	}
 	if check, ok := gitHookBudgetCheck(status.LogPath, generatedAt); ok {
@@ -660,6 +670,14 @@ func writeInventorySnapshotEvents(cfg endpointconfig.Config, settings endpointco
 		Harness:      schema.HarnessInfo{Name: "endpoint"},
 		Message:      "Agent configuration inventory snapshot observed",
 	})
+	// The scanner has already redacted what it captures and cut file contents to max_content_bytes;
+	// an MCP server definition, whose keys come from the user's config, had the field-name and flag
+	// rules applied (inventory.redactStructured). CleanValue redacts every string in them again and
+	// leaves our own field names such as env_keys, a list of variable names, as they are. Its limit
+	// is max_content_bytes, so captured contents are not cut again, but never below the raw-field
+	// limit the event writer applies to other raw strings, so a small max_content_bytes does not cut
+	// paths, names and hashes.
+	contentLimit := max(endpointinventory.ContentLimit(settings.MaxContentBytes), asymptoteobserve.DefaultRawStringLimit)
 	snapshot.Raw = map[string]interface{}{
 		"inventory": map[string]interface{}{
 			"generated_at":             result.GeneratedAt,
@@ -669,9 +687,9 @@ func writeInventorySnapshotEvents(cfg endpointconfig.Config, settings endpointco
 			"previous_snapshot_digest": previousDigest,
 			"counts":                   counts,
 			"user_scope":               result.UserScope,
-			"configs":                  existingInventoryConfigs(result.Configs),
-			"mcp_servers":              result.MCPServers,
-			"skills":                   existingInventorySkills(result.Skills),
+			"configs":                  asymptoteobserve.CleanValue(existingInventoryConfigs(result.Configs), contentLimit),
+			"mcp_servers":              asymptoteobserve.CleanValue(result.MCPServers, contentLimit),
+			"skills":                   asymptoteobserve.CleanValue(existingInventorySkills(result.Skills), contentLimit),
 		},
 	}
 	if _, err := writer.AppendEvent(snapshot, writer.Options{Path: inventoryLogPath, UserMode: cfg.UserMode}); err != nil {
@@ -1462,6 +1480,14 @@ func harnessAction(h harness.Harness, effectiveUserMode bool) string {
 	// sweep can only read what Grok has already committed. The check's message names the sweep for
 	// the cases where that is what is behind.
 	case "hooks+session_log":
+		// DeepSeek Harness hooks that are installed but cannot be loaded are not fixed by
+		// installing again, which would refuse: the bridge has to be installed into dsh first,
+		// and the dsh_hook_bridge check names the command.
+		// Discovery points ConfigPath at the hooks file only when the hooks are installed.
+		if h.Name == dshsession.Harness && h.TelemetryStatus == harness.TelemetryMisconfigured &&
+			filepath.Base(h.ConfigPath) == "beacon-endpoint-hooks.json" {
+			return "see the dsh_hook_bridge check; until then run beacon endpoint dsh sync"
+		}
 		return "beacon endpoint hooks install --harness " + h.Name
 	}
 	return ""

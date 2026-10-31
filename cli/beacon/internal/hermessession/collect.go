@@ -8,9 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/sessionfs"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,8 +17,9 @@ import (
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/schema"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/writer"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/sessionfs"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/sessionsync"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/sessionwindow"
-	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/sqliteuri"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 	_ "modernc.org/sqlite"
 )
@@ -41,6 +40,12 @@ type Cursor struct {
 	ReasoningTokens  int64                      `json:"reasoning_tokens,omitempty"`
 	CostUSD          float64                    `json:"cost_usd,omitempty"`
 	PendingCalls     map[string]json.RawMessage `json:"pending_calls,omitempty"`
+	// KeyedByHome keys the session's event ids by the Hermes home this cursor belongs to. It is set
+	// when another home already holds the session id, as a cloned profile does: both start from a
+	// copy of one state.db, and once the copies diverge their message ids count up independently, so
+	// unkeyed ids would name different events the same. It is decided before the session's first
+	// event is written and never changes after, so a session's ids stay stable.
+	KeyedByHome bool `json:"keyed_by_home,omitempty"`
 }
 
 type State struct {
@@ -49,7 +54,10 @@ type State struct {
 }
 
 type CollectOptions struct {
-	DBPath    string
+	DBPath string
+	// StatePath is this home's cursor file. The session home file beside it (SessionHomesPath) is
+	// shared by every home whose cursor sits in the same directory, and decides which of them keys a
+	// session's event ids by home. Without a StatePath no ids are keyed.
 	StatePath string
 	Write     bool
 	LogPath   string
@@ -67,6 +75,12 @@ type CollectOptions struct {
 	// keyed by home. A sweep whose StatePath holds no sessions yet starts from it, so an upgrade does not
 	// re-emit history that was already collected; the cursor is then saved to StatePath.
 	LegacyStatePath string
+	// RotateBytes is the size the runtime log rotates at while this sweep writes it; zero is
+	// writer.DefaultRotateBytes.
+	RotateBytes int64
+
+	// guard keeps the sweep from rotating its own output out of the log; CollectOnce sets it.
+	guard *writer.RetentionGuard
 }
 
 type Summary struct {
@@ -74,6 +88,7 @@ type Summary struct {
 	SessionsChanged int `json:"sessions_changed"`
 	EventsEmitted   int `json:"events_emitted"`
 	Errors          int `json:"errors"`
+	sessionsync.Retention
 }
 
 type Session struct {
@@ -159,47 +174,16 @@ func LoadStateSeeded(path, legacy string) (*State, error) {
 	return LoadState(legacy)
 }
 
-func LoadState(path string) (*State, error) {
-	state := &State{Version: StateVersion, Sessions: map[string]*Cursor{}}
-	if path == "" {
-		return state, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return state, nil
-		}
-		return nil, err
-	}
-	var stored State
-	if err := json.Unmarshal(data, &stored); err != nil {
-		return nil, fmt.Errorf("read Hermes collector state %s: %w", path, err)
-	}
-	if stored.Version != StateVersion || stored.Sessions == nil {
-		return state, nil
-	}
-	state.Sessions = stored.Sessions
-	return state, nil
+var stateFile = sessionsync.StateFile[State]{
+	Name:  "Hermes",
+	New:   func() *State { return &State{Version: StateVersion, Sessions: map[string]*Cursor{}} },
+	Valid: func(s *State) bool { return s.Version == StateVersion && s.Sessions != nil },
+	Stamp: func(s *State) { s.Version = StateVersion },
 }
 
-func (s *State) Save(path string) error {
-	if path == "" {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	s.Version = StateVersion
-	data, err := json.MarshalIndent(s, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
+func LoadState(path string) (*State, error) { return stateFile.Load(path) }
+
+func (s *State) Save(path string) error { return stateFile.Save(path, s) }
 
 func (s *State) cursor(sessionID string) *Cursor {
 	if s.Sessions == nil {
@@ -239,20 +223,26 @@ func CollectOnce(opts CollectOptions) (summary Summary, err error) {
 	if err != nil {
 		return summary, err
 	}
+	if err := assignEventIDHomes(SessionHomesPath(opts.StatePath), canonicalHome(filepath.Dir(store.Path())), sessions, state); err != nil {
+		return summary, fmt.Errorf("assign Hermes event id homes: %w", err)
+	}
 	defer func() {
 		if saveErr := state.Save(opts.StatePath); saveErr != nil && err == nil {
 			err = fmt.Errorf("save Hermes collector state: %w", saveErr)
 		}
 	}()
 	var errs []error
+	opts.guard = sessionsync.NewRetentionGuard(opts.Print, opts.Write)
+	var stopErr error
 	for _, session := range sessions {
 		changed, collectErr := collectSession(store, session, state, opts, &summary)
-		if errors.Is(collectErr, writer.ErrBudgetSpent) {
+		if sessionsync.Stopped(collectErr) {
 			// Not a failed session: this one and the rest are left for a later sync, with cursors
 			// that have not moved past anything that was not written.
 			if changed {
 				summary.SessionsChanged++
 			}
+			stopErr = collectErr
 			errs = append(errs, collectErr)
 			break
 		}
@@ -264,6 +254,9 @@ func CollectOnce(opts CollectOptions) (summary Summary, err error) {
 		if changed {
 			summary.SessionsChanged++
 		}
+	}
+	if rotatedOut := summary.Finish(opts.sink(), stopErr); rotatedOut != nil {
+		errs = append(errs, rotatedOut)
 	}
 	if len(errs) > 0 {
 		return summary, errors.Join(errs...)
@@ -277,8 +270,12 @@ func collectSession(store *Store, session Session, state *State, opts CollectOpt
 	if err != nil {
 		return false, err
 	}
-	mapped, pending := MapSession(session, messages, cursor)
 	home := filepath.Dir(store.Path())
+	idHome := ""
+	if cursor.KeyedByHome {
+		idHome = canonicalHome(home)
+	}
+	mapped, pending := mapSession(session, messages, cursor, idHome)
 	for i := range mapped {
 		mapped[i].Event.Harness.ConfigPath = home
 		mapped[i].Event.Harness.Profile = Profile(home)
@@ -290,7 +287,7 @@ func collectSession(store *Store, session Session, state *State, opts CollectOpt
 		return false, nil
 	}
 	for _, item := range mapped {
-		if err := emit(item.Event, opts); err != nil {
+		if err := opts.sink().Emit(item.Event); err != nil {
 			return true, err
 		}
 		summary.EventsEmitted++
@@ -346,31 +343,20 @@ func updateCursorTotals(cursor *Cursor, session Session) {
 	}
 }
 
-func emit(event schema.Event, opts CollectOptions) error {
-	if opts.Print && opts.Out != nil {
-		data, err := json.Marshal(event)
-		if err != nil {
-			return err
-		}
-		if _, err := opts.Out.Write(append(data, '\n')); err != nil {
-			return err
-		}
-	}
-	if opts.Write {
-		if _, err := writer.AppendEvent(event, writer.Options{Path: opts.LogPath, UserMode: opts.UserMode, Budget: opts.Budget}); err != nil {
-			return err
-		}
-	}
-	return nil
+func (o CollectOptions) sink() sessionsync.Sink {
+	return sessionsync.Sink{Print: o.Print, Out: o.Out, Write: o.Write, Log: writer.Options{Path: o.LogPath, UserMode: o.UserMode, RotateSize: o.RotateBytes, Budget: o.Budget, Guard: o.guard}}
 }
 
 type Store struct {
 	path string
 	db   *sql.DB
+	// Hermes adds columns to an existing state.db as it upgrades, so an older database lacks some
+	// the collector reads, such as cwd and archived. Those read as NULL or their default instead.
+	sessionCols, messageCols map[string]bool
 }
 
 func OpenStore(path string) (*Store, error) {
-	db, err := openSQLiteReadOnly(path)
+	db, err := sessionsync.OpenSQLite(path, "busy_timeout(1000)")
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +364,52 @@ func OpenStore(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &Store{path: path, db: db}, nil
+	store := &Store{path: path, db: db}
+	if store.sessionCols, err = tableColumns(db, "sessions"); err == nil {
+		store.messageCols, err = tableColumns(db, "messages")
+	}
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
+// column is alias.name when the table has the column, and fallback when it does not.
+func column(cols map[string]bool, alias, name, fallback string) string {
+	if !cols[name] {
+		return fallback
+	}
+	if alias != "" {
+		return alias + "." + name
+	}
+	return name
+}
+
+// columns selects each name, or NULL for one the table does not have.
+func columns(cols map[string]bool, names ...string) string {
+	out := make([]string, len(names))
+	for i, name := range names {
+		out[i] = column(cols, "", name, "NULL")
+	}
+	return strings.Join(out, ", ")
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -387,13 +418,13 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) ListSessions() ([]Session, error) {
 	rows, err := s.db.Query(`
-SELECT id, source, model, cwd, title, parent_session_id, started_at, ended_at, end_reason,
-       message_count, tool_call_count, input_tokens, output_tokens, cache_read_tokens,
-       cache_write_tokens, reasoning_tokens, estimated_cost_usd, actual_cost_usd,
-       cost_status, cost_source,
-       (SELECT max(m.timestamp) FROM messages m WHERE m.session_id = sessions.id AND m.active = 1) AS last_message_at
+SELECT id, source, ` + columns(s.sessionCols, "model", "cwd", "title", "parent_session_id") + `, started_at,
+       ` + columns(s.sessionCols, "ended_at", "end_reason", "message_count", "tool_call_count", "input_tokens",
+		"output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd",
+		"actual_cost_usd", "cost_status", "cost_source") + `,
+       (SELECT max(m.timestamp) FROM messages m WHERE m.session_id = sessions.id AND ` + column(s.messageCols, "m", "active", "1") + ` = 1) AS last_message_at
 FROM sessions
-WHERE archived = 0
+WHERE ` + column(s.sessionCols, "", "archived", "0") + ` = 0
 ORDER BY started_at, id`)
 	if err != nil {
 		return nil, err
@@ -437,11 +468,11 @@ ORDER BY started_at, id`)
 
 func (s *Store) ReadMessages(sessionID string, afterID int64) ([]Message, error) {
 	rows, err := s.db.Query(`
-SELECT id, session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp,
-       token_count, finish_reason, reasoning, reasoning_content, reasoning_details,
-       platform_message_id, observed, active
+SELECT id, session_id, role, `+columns(s.messageCols, "content", "tool_call_id", "tool_calls", "tool_name")+`, timestamp,
+       `+columns(s.messageCols, "token_count", "finish_reason", "reasoning", "reasoning_content", "reasoning_details",
+		"platform_message_id", "observed")+`, `+column(s.messageCols, "", "active", "1")+`
 FROM messages
-WHERE session_id = ? AND active = 1 AND id > ?
+WHERE session_id = ? AND `+column(s.messageCols, "", "active", "1")+` = 1 AND id > ?
 ORDER BY id`, sessionID, afterID)
 	if err != nil {
 		return nil, err
@@ -495,28 +526,8 @@ type SessionDetail struct {
 
 // SessionDetails returns a SessionDetail for every session ListSessions lists, keyed by id.
 func (s *Store) SessionDetails() (map[string]SessionDetail, error) {
-	columns := map[string]bool{}
-	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('sessions')`)
-	if err != nil {
-		return nil, err
-	}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		columns[name] = true
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	branch := "NULL"
-	if columns["git_branch"] {
-		branch = "git_branch"
-	}
 	out := map[string]SessionDetail{}
-	rows, err = s.db.Query(`SELECT id, model_config, ` + branch + ` FROM sessions WHERE archived = 0`)
+	rows, err := s.db.Query(`SELECT id, ` + columns(s.sessionCols, "model_config", "git_branch") + ` FROM sessions WHERE ` + column(s.sessionCols, "", "archived", "0") + ` = 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -539,10 +550,10 @@ func (s *Store) SessionDetails() (map[string]SessionDetail, error) {
 	rows, err = s.db.Query(`
 SELECT session_id, max(timestamp),
        (SELECT f.content FROM messages f
-        WHERE f.session_id = m.session_id AND f.active = 1 AND f.role = 'user' AND trim(COALESCE(f.content, '')) != ''
+        WHERE f.session_id = m.session_id AND ` + column(s.messageCols, "f", "active", "1") + ` = 1 AND f.role = 'user' AND trim(COALESCE(f.content, '')) != ''
         ORDER BY f.id LIMIT 1)
 FROM messages m
-WHERE active = 1
+WHERE ` + column(s.messageCols, "m", "active", "1") + ` = 1
 GROUP BY session_id`)
 	if err != nil {
 		return nil, err
@@ -568,18 +579,10 @@ GROUP BY session_id`)
 
 func (s *Store) LastMessageID(sessionID string) (int64, error) {
 	var last sql.NullInt64
-	if err := s.db.QueryRow(`SELECT max(id) FROM messages WHERE session_id = ? AND active = 1`, sessionID).Scan(&last); err != nil {
+	if err := s.db.QueryRow(`SELECT max(id) FROM messages WHERE session_id = ? AND `+column(s.messageCols, "", "active", "1")+` = 1`, sessionID).Scan(&last); err != nil {
 		return 0, err
 	}
 	return last.Int64, nil
-}
-
-func openSQLiteReadOnly(path string) (*sql.DB, error) {
-	path, err := sessionfs.SQLitePath(path)
-	if err != nil {
-		return nil, err
-	}
-	return sql.Open("sqlite", sqliteuri.File(path, url.Values{"mode": {"ro"}, "_pragma": {"busy_timeout(1000)"}}))
 }
 
 // MapSession maps one session's new messages into endpoint events. It also returns the tool calls
@@ -594,7 +597,14 @@ func openSQLiteReadOnly(path string) (*sql.DB, error) {
 // cursor is what earlier sweeps collected; a zero Cursor maps the whole session, session-total
 // usage included, as a first sync does.
 func MapSession(session Session, messages []Message, cursor *Cursor) ([]MappedEvent, map[string]json.RawMessage) {
-	m := &mapper{session: session, cursor: cursor, calls: map[string]toolCall{}}
+	return mapSession(session, messages, cursor, "")
+}
+
+// mapSession is MapSession with the event ids keyed by idHome, the canonical path of the Hermes
+// home the session was read from. An empty idHome derives the ids from the session alone, as every
+// sync did before homes could collide.
+func mapSession(session Session, messages []Message, cursor *Cursor, idHome string) ([]MappedEvent, map[string]json.RawMessage) {
+	m := &mapper{session: session, cursor: cursor, calls: map[string]toolCall{}, idHome: idHome}
 	for id, raw := range cursor.PendingCalls {
 		var call toolCall
 		if json.Unmarshal(raw, &call) == nil && call.ID != "" {
@@ -631,6 +641,7 @@ func encodePendingCalls(calls map[string]toolCall) map[string]json.RawMessage {
 type mapper struct {
 	session         Session
 	cursor          *Cursor
+	idHome          string
 	out             []MappedEvent
 	calls           map[string]toolCall
 	lastTimestampMS int64
@@ -863,7 +874,13 @@ func (m *mapper) toolEvent(timestampMS int64, call toolCall, action, category st
 }
 
 func (m *mapper) append(sourceMessageID int64, suffix string, ev schema.Event) {
-	ev.Event.ID = hermesEventID(fmt.Sprintf("%s:%d:%s", m.session.ID, sourceMessageID, suffix))
+	dedupID := fmt.Sprintf("%s:%d:%s", m.session.ID, sourceMessageID, suffix)
+	if m.idHome != "" {
+		// The home ends at a newline, which Hermes session ids do not contain, so a keyed id never
+		// equals an unkeyed one.
+		dedupID = m.idHome + "\n" + dedupID
+	}
+	ev.Event.ID = hermesEventID(dedupID)
 	m.out = append(m.out, MappedEvent{SourceMessageID: sourceMessageID, Event: ev})
 }
 

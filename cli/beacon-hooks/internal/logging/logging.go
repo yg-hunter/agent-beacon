@@ -13,12 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon-hooks/internal/config"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/activesession"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/filelock"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/localingest"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/shareauto"
 )
 
@@ -34,6 +36,17 @@ const (
 	// three writers.
 	endpointRuntimeFileMode = asymptoteobserve.SharedRuntimeLogFileMode
 )
+
+// endpointEventsSuppressed stops this process writing endpoint events. A hook sets it when another
+// hook of Beacon's records the same event, as when Cursor runs Beacon's Claude Code hooks next to
+// its own.
+var endpointEventsSuppressed bool
+
+// SuppressEndpointEvents turns endpoint event writes off (true) or back on (false) for the rest of
+// this process.
+func SuppressEndpointEvents(suppress bool) {
+	endpointEventsSuppressed = suppress
+}
 
 // Logger provides structured JSON logging for hook events
 type Logger struct {
@@ -122,6 +135,9 @@ func (l *Logger) EndpointEvent(action, category, severity, message string, field
 // approval from a pre-tool notification, for instance -- so those events are distinguishable from
 // the ones a runtime actually reported.
 func (l *Logger) EndpointEventWithFidelity(action, category, severity, message, fidelity string, fields map[string]interface{}) error {
+	if endpointEventsSuppressed {
+		return nil
+	}
 	path := endpointLogPath()
 	if path == "" {
 		return nil
@@ -521,7 +537,45 @@ func writeEndpointJSONFile(path string, event map[string]interface{}) error {
 	if data, err = withEndpointEventID(event, data); err != nil {
 		return err
 	}
-	return appendEndpointJSONL(path, append(data, '\n'), defaultEndpointRotateBytes, defaultEndpointRotateArchives)
+	return deliverEndpointLine(path, data)
+}
+
+// EndpointIngest delivers to the system log through the collector when the endpoint is in the
+// restricted log access mode. Tests point it at a socket and spool of their own; nothing else
+// changes it.
+var EndpointIngest = defaultEndpointIngest()
+
+// defaultEndpointIngest is the real socket and the account's spool, except in a test binary, where
+// a test writing a system log as an ordinary account must never reach the machine's collector or
+// leave lines in the developer's own spool.
+func defaultEndpointIngest() localingest.Deliverer {
+	if !testing.Testing() {
+		return localingest.Deliverer{}
+	}
+	dir := filepath.Join(os.TempDir(), fmt.Sprintf("beacon-hooks-test-%d", os.Getpid()))
+	socket := filepath.Join(dir, "no-collector.sock")
+	if runtime.GOOS == "windows" {
+		socket = fmt.Sprintf(`\\.\pipe\beacon-hooks-test-%d-none`, os.Getpid())
+	}
+	return localingest.Deliverer{
+		Client: localingest.Client{SocketPath: socket},
+		Spool:  localingest.Spool{Dir: filepath.Join(dir, "spool")},
+	}
+}
+
+// deliverEndpointLine writes one finished line to the runtime log at path.
+//
+// A hook writing the system log as an ordinary account hands the line to the collector over the
+// local ingest socket when the endpoint has one (the restricted log access mode, in which the log
+// is not writable by this account at all), and otherwise appends directly, as hooks always have.
+// Only a direct append the log refuses -- a restricted endpoint whose collector is restarting --
+// puts the line in this account's private spool, and it reaches the log with a later event
+// instead of being lost. Root and per-user logs are always written directly. See
+// localingest.Deliverer.Write.
+func deliverEndpointLine(path string, data []byte) error {
+	return EndpointIngest.Write(path, data, func(line []byte) error {
+		return appendEndpointJSONL(path, append(line[:len(line):len(line)], '\n'), defaultEndpointRotateBytes, defaultEndpointRotateArchives)
+	})
 }
 
 // withEndpointEventID fills event.id on an event assembled as a map and returns
@@ -628,10 +682,6 @@ func endpointLogPath() string {
 	return filepath.Join(home, ".beacon", "endpoint", "logs", "runtime.jsonl")
 }
 
-func redactEndpointString(value string) string {
-	return asymptoteobserve.RedactString(value)
-}
-
 func sanitizeEndpointMap(input map[string]interface{}) map[string]interface{} {
 	return asymptoteobserve.SanitizeMap(input, asymptoteobserve.PrivacyOptions{
 		RedactSecrets: true,
@@ -731,7 +781,7 @@ func rotateEndpointLogIfNeeded(path string, maxSize int64, archives int, nextWri
 	if err := os.Rename(path, path+".1"); err != nil {
 		return err
 	}
-	asymptoteobserve.TightenPrivateRuntimeLogArchives(path, archives)
+	asymptoteobserve.SettleRuntimeLogArchives(path, archives)
 	return nil
 }
 
