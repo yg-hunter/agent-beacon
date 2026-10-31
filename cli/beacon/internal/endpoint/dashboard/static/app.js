@@ -3273,32 +3273,126 @@ async function loadDetections() {
   try {
     const resp = await getJSON("/api/detections");
     state.error = null;
-    renderDetections(resp);
+    state.detections = resp;
+  renderDetections(resp);
   } catch (err) {
     state.error = err;
     setText("#detections-meta", t("Failed to load detections: {error}", { error: err.message }));
   }
 }
 
+let detectionSeverity = "";
+let detectionQuery = "";
+
+function detectionSeverityPill(severity) {
+  const labels = { critical: "critical", high: "high", medium: "medium", low: "low" };
+  const classes = { critical: "danger", high: "high", medium: "medium", low: "muted" };
+  const key = labels[severity] ? severity : "unknown";
+  return `<span class="state-pill ${classes[severity] ?? "muted"}">${escapeHTML(t(labels[key] ?? severity))}</span>`;
+}
+
+function detectionStatusPill(status) {
+  if (status === "stable") {
+    return `<span class="state-pill ok">${escapeHTML(t("Active"))}</span>`;
+  }
+  if (status === "experimental") {
+    return `<span class="state-pill muted">${escapeHTML(t("Observation only"))}</span>`;
+  }
+  return `<span class="state-pill muted">${escapeHTML(status || t("Unknown"))}</span>`;
+}
+
+function detectionTaxonomyLabel(taxonomy) {
+  const category = taxonomy?.beacon_category || "";
+  const labels = {
+    "context-exfiltration": "Context exfiltration",
+    "risky-command": "Risky command",
+    "sensitive-edit": "Sensitive edit",
+    "prompt-injection": "Prompt injection",
+    "credential-access": "Credential access",
+    "external-access": "External access",
+    "source-control": "Source control",
+    "agent-control": "Agent control",
+    "approval-abuse": "Approval abuse",
+    "resource-consumption": "Resource consumption",
+  };
+  return labels[category] ? t(labels[category]) : category ? t(category) : "—";
+}
+
+function detectionKindChip(kind) {
+  const labels = { match: "Match", correlation: "Correlation" };
+  if (!labels[kind]) return `<span class="muted">—</span>`;
+  return `<span class="granularity-chip request">${escapeHTML(t(labels[kind]))}</span>`;
+}
+
 function renderDetections(resp) {
   const rules = resp?.rules || [];
-  setText("#detections-meta", t("{count} active rules", { count: rules.length }));
+  const filtered = rules.filter((rule) => {
+    if (detectionSeverity && rule.severity !== detectionSeverity) return false;
+    if (detectionQuery) {
+      const haystack = [rule.id, rule.title, rule.description, rule.reason]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (!haystack.includes(detectionQuery)) return false;
+    }
+    return true;
+  });
+  const active = rules.filter((rule) => rule.status === "stable").length;
+  const observation = rules.length - active;
+  const categories = new Set(rules.map((rule) => rule.taxonomy?.beacon_category).filter(Boolean));
+
+  const kpis = $("#detection-kpis");
+  if (kpis) {
+    const cards = [
+      { label: t("Rules total"), value: String(rules.length) },
+      { label: t("Active"), value: String(active) },
+      { label: t("Observation only"), value: String(observation) },
+      { label: t("Rule categories"), value: String(categories.size) },
+    ];
+    kpis.innerHTML = cards
+      .map(
+        (card) =>
+          `<div class="kpi-card"><span class="kpi-label">${escapeHTML(card.label)}</span><span class="kpi-value">${escapeHTML(card.value)}</span></div>`,
+      )
+      .join("");
+  }
+
+  const count = $("#detection-count");
+  if (count) {
+    count.textContent = `${filtered.length} / ${rules.length} ${t("rules")}`;
+  }
+
+  const categoriesEl = $("#detection-categories");
+  if (categoriesEl) {
+    const counts = {};
+    for (const rule of rules) {
+      const category = rule.taxonomy?.beacon_category;
+      if (category) counts[category] = (counts[category] ?? 0) + 1;
+    }
+    const chips = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([category, value]) => `<span class="granularity-chip">${escapeHTML(detectionTaxonomyLabel({ beacon_category: category }))} ${value}</span>`)
+      .join("");
+    categoriesEl.innerHTML = `<strong>${escapeHTML(t("Rule categories"))}</strong>${chips}`;
+  }
+
   const tbody = $("#detections-rows");
   if (!tbody) return;
-  if (!rules.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No active rules."))}</td></tr>`;
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">${escapeHTML(t("No active rules."))}</td></tr>`;
     return;
   }
-  tbody.innerHTML = rules
+  tbody.innerHTML = filtered
     .map((rule) => `
       <tr id="rule-${escapeHTML(rule.id)}">
-        <td>${badge(rule.severity || "unknown", `severity-${rule.severity || "unknown"}`)}</td>
-        <td><span class="mono">${escapeHTML(rule.id)}</span><br /><span class="muted">${escapeHTML(rule.title || "")}</span></td>
-        <td>${escapeHTML(rule.status || "")}</td>
+        <td><span class="mono">${escapeHTML(rule.id)}</span><br /><strong>${escapeHTML(rule.title || "")}</strong>${rule.description ? `<br /><span class="muted">${escapeHTML(rule.description)}</span>` : ""}</td>
+        <td>${escapeHTML(detectionTaxonomyLabel(rule.taxonomy))}</td>
+        <td>${detectionSeverityPill(rule.severity)}</td>
+        <td>${detectionStatusPill(rule.status)}</td>
         <td>${escapeHTML(rule.posture || "")}</td>
-        <td>${escapeHTML(rule.kind || "")}</td>
+        <td>${detectionKindChip(rule.kind)}</td>
         <td>${badge(rule.source || "unknown", "badge-muted")}</td>
-        <td>${escapeHTML(rule.reason || "")}</td>
+        <td class="reason-cell">${escapeHTML(rule.reason || "")}</td>
       </tr>
     `)
     .join("");
@@ -4114,9 +4208,29 @@ reapplyBlockedStyles(document.body);
 cspStyleObserver.observe(document.body, { childList: true, subtree: true });
 
 if (isDetectionsPage) {
-  window.__beaconForceRefresh = () => refreshData(loadDetections);
+  const severityTabs = $("#detection-severity-tabs");
+  if (severityTabs) {
+    severityTabs.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-severity]");
+      if (!button) return;
+      detectionSeverity = button.dataset.severity;
+      for (const option of severityTabs.querySelectorAll("button")) {
+        option.classList.toggle("active", option === button);
+      }
+      const rules = state.detections?.rules ?? [];
+      renderDetections({ rules });
+    });
+  }
+  const search = $("#detection-search");
+  if (search) {
+    search.addEventListener("input", () => {
+      detectionQuery = search.value.trim().toLowerCase();
+      const rules = state.detections?.rules ?? [];
+      renderDetections({ rules });
+    });
+  }
   loadDetections().catch(console.error);
-  setInterval(() => { if (!document.hidden) refreshData(loadDetections).catch(console.error); }, 60000);
+  setInterval(() => loadDetections().catch(console.error), 60000);
 } else if (isFindingsPage) {
   window.__beaconForceRefresh = () => refreshData(loadFindings);
   loadFindings().catch(console.error);

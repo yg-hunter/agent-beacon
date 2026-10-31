@@ -5191,3 +5191,20 @@ main > section:empty {
   overflow: hidden;
   white-space: nowrap;
 }
+
+/* ---- Detections severity shades (design board 14) ---- */
+.state-pill.high {
+  color: #a15c1f;
+  background: #fbe9d7;
+}
+.state-pill.medium {
+  color: #8a6d1a;
+  background: #faf0d0;
+}
+.reason-cell {
+  max-width: 420px;
+  min-width: 220px;
+}
+#detection-search {
+  min-width: 200px;
+}
