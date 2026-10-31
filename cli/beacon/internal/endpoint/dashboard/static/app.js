@@ -1,3 +1,5 @@
+const t = window.BeaconI18n.t;
+
 const state = {
   status: null,
   summary: null,
@@ -76,8 +78,60 @@ const presets = {
   high: { severity: "high", limit: "500" },
 };
 
-async function getJSON(path) {
-  const response = await fetch(path);
+// Stale-while-revalidate data cache: after navigation a page renders the last fetched
+// payload immediately; the 60s background timer and the refresh button always hit the
+// network. Entries are per URL (filters included) and live in this tab's sessionStorage.
+const dataCachePrefix = "beacon.dashboard.cache.";
+const dataCacheTTL = 60000;
+const dataCacheEntryLimit = 2000000;
+let dataNetworkForced = false;
+let dataUpdatedAt = null;
+let dataFromCache = false;
+
+function readDataCache(path) {
+  try {
+    const raw = sessionStorage.getItem(dataCachePrefix + path);
+    if (!raw) return null;
+    const entry = JSON.parse(raw);
+    if (!entry || !Number.isFinite(entry.at)) return null;
+    return entry;
+  } catch (_) {
+    return null;
+  }
+}
+
+function writeDataCache(path, payload) {
+  try {
+    const text = JSON.stringify({ at: Date.now(), data: payload });
+    // Oversized payloads would risk the session quota; render them uncached instead.
+    if (text.length > dataCacheEntryLimit) return;
+    sessionStorage.setItem(dataCachePrefix + path, text);
+  } catch (_) {
+    // Quota or serialization failures must never break rendering.
+  }
+}
+
+// Clear cached entries after data-changing actions (snapshot imports) or wholesale.
+function clearDataCache(prefix = "") {
+  try {
+    for (const key of Object.keys(sessionStorage)) {
+      if (key.startsWith(dataCachePrefix) && key.includes(prefix)) sessionStorage.removeItem(key);
+    }
+  } catch (_) {
+    // Storage unavailable; the next forced refresh still gets fresh data.
+  }
+}
+window.clearDataCache = clearDataCache;
+
+// Rendered freshness text: cached renders show when the payload was fetched.
+function dataFreshnessText(prefix) {
+  if (!dataUpdatedAt) return "";
+  const time = new Date(dataUpdatedAt).toLocaleTimeString();
+  return `${prefix}${t(dataFromCache ? "Cached at {time}; refresh for the latest" : "Updated at {time}", { time })}`;
+}
+
+async function fetchJSON(path, options = {}) {
+  const response = await fetch(path, options);
   if (!response.ok) {
     let message = `${response.status} ${response.statusText}`;
     try {
@@ -89,6 +143,33 @@ async function getJSON(path) {
     throw new Error(message);
   }
   return response.json();
+}
+
+async function getJSON(path, options = {}) {
+  if (!dataNetworkForced) {
+    const entry = readDataCache(path);
+    if (entry && Date.now() - entry.at < dataCacheTTL) {
+      dataUpdatedAt = Math.max(dataUpdatedAt ?? 0, entry.at);
+      dataFromCache = true;
+      return entry.data;
+    }
+  }
+  const payload = await fetchJSON(path, options);
+  writeDataCache(path, payload);
+  dataUpdatedAt = Math.max(dataUpdatedAt ?? 0, Date.now());
+  dataFromCache = false;
+  return payload;
+}
+
+// Force the wrapped loader to bypass the cache for this pass (background timer,
+// refresh button, or post-mutation reload).
+async function refreshData(load) {
+  dataNetworkForced = true;
+  try {
+    await load();
+  } finally {
+    dataNetworkForced = false;
+  }
 }
 
 function queryFromFilters() {
@@ -170,7 +251,7 @@ async function load({ updateLocation = false, mode = "replace" } = {}) {
   const query = queryFromFilters();
   if (updateLocation) updateURL(query);
   const suffix = query ? `?${query}` : "";
-  const activityPath = isSessionsPage ? "/api/sessions" : "/api/events";
+  const activityPath = isSessionsPage || isOverviewPage ? "/api/sessions" : "/api/events";
   const quiet = mode === "poll";
   state.loading = !quiet;
   state.error = null;
@@ -184,9 +265,9 @@ async function load({ updateLocation = false, mode = "replace" } = {}) {
     if (generation !== activityLoadGeneration) return;
     state.status = status;
     state.summary = summary;
-    state.eventResult = isSessionsPage ? null : events;
-    state.sessionResult = isSessionsPage ? events : null;
-    state.events = isSessionsPage ? [] : (events.events || []);
+    state.eventResult = isSessionsPage || isOverviewPage ? null : events;
+    state.sessionResult = isSessionsPage || isOverviewPage ? events : null;
+    state.events = isSessionsPage || isOverviewPage ? [] : (events.events || []);
     state.sessions = isSessionsPage ? (events.sessions || []) : [];
   } catch (err) {
     if (generation === activityLoadGeneration) state.error = err;
@@ -200,8 +281,12 @@ async function load({ updateLocation = false, mode = "replace" } = {}) {
 }
 
 function render() {
-  setText("#log-path", state.status?.log_path || "Runtime log unavailable");
-  setText("#last-updated", state.summary?.last_event_time ? `Last event ${formatTime(state.summary.last_event_time)}` : "");
+  setText("#log-path", state.status?.log_path || t("Runtime log unavailable"));
+  setText("#last-updated", state.summary?.last_event_time ? t("Last event {time}", { time: formatTime(state.summary.last_event_time) }) : "");
+  if (isOverviewPage) {
+    renderOverviewPage();
+    return;
+  }
   renderFilterOptions();
   renderCards();
   renderActivityAnalytics();
@@ -210,19 +295,171 @@ function render() {
   renderEvents();
 }
 
+/* Overview page (design board: Agent activity) — KPIs, time distribution,
+   source session distribution and attention items. */
+let overviewBucket = "24h";
+
+function renderOverviewPage() {
+  const summary = state.summary ?? {};
+  const sessions = state.sessionResult?.sessions ?? [];
+  renderOverviewKpis(summary);
+  renderOverviewHourly(sessions);
+  renderOverviewSources(sessions, summary);
+  renderOverviewAttention(summary);
+}
+
+function renderOverviewKpis(summary) {
+  const el = $("#overview-kpis");
+  if (!el) return;
+  const writes = summary.file_events || 0;
+  const cards = [
+    { label: t("Active sessions"), value: String(summary.active_sessions ?? 0), hint: t("sessions seen in the log") },
+    { label: t("Events"), value: Number(summary.total_events ?? 0).toLocaleString(), hint: t("matching current view") },
+    { label: t("Tool calls"), value: Number(summary.tool_events ?? 0).toLocaleString(), hint: t("tool.invoked events") },
+    { label: t("Commands and writes"), value: Number((summary.command_events ?? 0) + writes).toLocaleString(), hint: t("commands {n} / writes {m}", { n: summary.command_events ?? 0, m: writes }) },
+  ];
+  el.innerHTML = cards
+    .map(
+      (card) =>
+        `<div class="kpi-card"><span class="kpi-label">${escapeHTML(card.label)}</span><span class="kpi-value">${escapeHTML(card.value)}</span><span class="kpi-hint">${escapeHTML(card.hint)}</span></div>`,
+    )
+    .join("");
+}
+
+function renderOverviewHourly(sessions) {
+  const el = $("#overview-hourly");
+  if (!el) return;
+  const now = Date.now();
+  const slots = overviewBucket === "24h" ? 24 : 7;
+  const windowMs = windowMsOf(slots);
+  const width = windowMs / slots;
+  const buckets = new Map();
+  for (let i = 0; i < slots; i += 1) {
+    buckets.set(Math.floor((now - i * width) / width) * width, 0);
+  }
+  let covered = 0;
+  for (const session of sessions) {
+    const stamp = Date.parse(session.last_event_at);
+    if (!Number.isFinite(stamp) || stamp < now - windowMs) continue;
+    const slotStart = Math.floor(stamp / width) * width;
+    buckets.set(slotStart, (buckets.get(slotStart) ?? 0) + 1);
+    covered += 1;
+  }
+  const starts = [...buckets.keys()].sort((a, b) => a - b);
+  const max = Math.max(...starts.map((slot) => buckets.get(slot) ?? 0), 1);
+  const label = (slot) =>
+    overviewBucket === "24h"
+      ? new Date(slot).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+      : new Date(slot).toLocaleDateString([], { month: "2-digit", day: "2-digit" });
+  el.innerHTML = `<div class="hour-bars">${starts
+    .map((slot) => {
+      const count = buckets.get(slot) ?? 0;
+      const height = Math.max(2, Math.round((count / max) * 100));
+      return `<span class="hour-bar" title="${escapeHTML(label(slot))} · ${escapeHTML(t("{count} sessions", { count }))}" data-height="${height}"></span>`;
+    })
+    .join("")}</div><div class="hour-labels">${starts
+    .map((slot, index) => (index % Math.ceil(starts.length / 8) === 0 ? `<span>${escapeHTML(label(slot))}</span>` : ""))
+    .join("")}</div>`;
+  // Bar heights go through the CSSOM (CSP forbids style attributes).
+  el.querySelectorAll(".hour-bar").forEach((bar) => {
+    bar.style.height = `${bar.dataset.height}%`;
+  });
+  const note = $("#overview-hourly-note");
+  if (note) {
+    note.textContent = t("Based on each session's latest activity time ({count} sessions).", { count: covered });
+  }
+}
+
+function windowMsOf(slots) {
+  return slots === 24 ? 24 * 3600000 : 7 * 86400000;
+}
+
+function renderOverviewSources(sessions, summary) {
+  const el = $("#overview-sources");
+  if (!el) return;
+  const counts = new Map();
+  for (const session of sessions) {
+    if (!session.harness) continue;
+    counts.set(session.harness, (counts.get(session.harness) ?? 0) + 1);
+  }
+  const rows = [...counts.entries()]
+    .map(([name, value]) => ({ name, value }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 6);
+  if (!rows.length) {
+    el.innerHTML = `<p class="muted">${escapeHTML(t("No sessions in this range"))}</p>`;
+    return;
+  }
+  const max = Math.max(...rows.map((row) => row.value), 1);
+  el.innerHTML = rows
+    .map(
+      (row) =>
+        `<div class="project-bar-row"><span>${escapeHTML(harnessLabel(row.name))}</span><span class="pb-track"><span class="pb-fill"></span></span><em>${escapeHTML(t("{count} sessions", { count: row.value }))}</em></div>`,
+    )
+    .join("");
+  const barRows = el.querySelectorAll(".project-bar-row");
+  rows.forEach((row, index) => {
+    const fill = barRows[index]?.querySelector(".pb-fill");
+    if (fill) {
+      fill.style.width = `${Math.max(2, (row.value / max) * 100).toFixed(1)}%`;
+    }
+  });
+}
+
+function renderOverviewAttention(summary) {
+  const el = $("#overview-attention");
+  if (!el) return;
+  const count = Number(window.__beaconFindingsCount ?? 0);
+  const items = [];
+  if (count > 0) {
+    items.push({
+      level: "danger",
+      title: t("{count} findings awaiting review", { count }),
+      body: t("Review the flagged sessions before drawing conclusions."),
+      action: t("Go to findings"),
+      href: "/findings.html",
+    });
+  }
+  items.push({
+    level: "activity",
+    title: t("Cursor sessions and models are parsed locally"),
+    body: t("Billing tokens are accounted by Cursor servers and are not stored locally."),
+    action: t("View token usage"),
+    href: "/tokens.html?view=agents&harness=cursor",
+  });
+  items.push({
+    level: "muted",
+    title: t("Doubao Work activity times come from trajectory file modification times"),
+    body: t("They are not per-message timestamps and carry no token usage."),
+    action: t("View collection management"),
+    href: "/tokens.html?view=sources",
+  });
+  const countPill = $("#overview-attention-count");
+  if (countPill) {
+    countPill.hidden = false;
+    countPill.textContent = t("{count} items", { count: items.length });
+  }
+  el.innerHTML = items
+    .map(
+      (item) =>
+        `<div class="attention-item level-${item.level}"><div><strong>${escapeHTML(item.title)}</strong><p>${escapeHTML(item.body)}</p></div><a class="attention-link" href="${escapeHTML(item.href)}">${escapeHTML(item.action)}</a></div>`,
+    )
+    .join("");
+}
+
 function renderCards() {
   if (!$("#cards")) return;
   const topHarness = firstCount(state.summary?.top_harnesses);
   const topModel = firstCount(state.summary?.top_models);
   const cards = [
-    { label: "Events", value: state.summary?.total_events || 0, hint: "matching current view" },
-    { label: "Needs Review", value: state.summary?.needs_review_events || 0, tone: "danger", filters: { review: "true" } },
-    { label: "High/Critical", value: (state.summary?.high_severity_events || 0) + (state.summary?.critical_severity_events || 0), tone: "danger", filters: { review: "true" } },
-    { label: "Denied/Blocked", value: (state.summary?.denied_approval_events || 0) + (state.summary?.policy_blocked_events || 0), tone: "danger", filters: { category: "approval", review: "true" } },
-    { label: "Failed Tools", value: state.summary?.failed_tool_events || 0, tone: "warn", filters: { action: "tool.failed" } },
-    { label: "Sessions", value: state.summary?.active_sessions || 0, hint: "active sessions" },
-    { label: "Top Harness", value: topHarness?.name || "None", hint: topHarness ? `${topHarness.count} events` : "no harness events", filters: topHarness ? { harness: topHarness.name } : null },
-    { label: "Top Model", value: topModel?.name || "None", hint: topModel ? `${topModel.count} events` : "no model events", filters: topModel ? { model: topModel.name } : null },
+    { label: t("Events"), value: state.summary?.total_events || 0, hint: t("matching current view") },
+    { label: t("Needs Review"), value: state.summary?.needs_review_events || 0, tone: "danger", filters: { review: "true" } },
+    { label: t("High/Critical"), value: (state.summary?.high_severity_events || 0) + (state.summary?.critical_severity_events || 0), tone: "danger", filters: { review: "true" } },
+    { label: t("Denied/Blocked"), value: (state.summary?.denied_approval_events || 0) + (state.summary?.policy_blocked_events || 0), tone: "danger", filters: { category: "approval", review: "true" } },
+    { label: t("Failed Tools"), value: state.summary?.failed_tool_events || 0, tone: "warn", filters: { action: "tool.failed" } },
+    { label: t("Sessions"), value: state.summary?.active_sessions || 0, hint: t("active sessions") },
+    { label: t("Top Harness"), value: topHarness?.name || t("None"), hint: topHarness ? `${topHarness.count} events` : t("no harness events"), filters: topHarness ? { harness: topHarness.name } : null },
+    { label: t("Top Model"), value: topModel?.name || t("None"), hint: topModel ? `${topModel.count} events` : t("no model events"), filters: topModel ? { model: topModel.name } : null },
   ];
   $("#cards").innerHTML = cards
     .map((card, index) => `
@@ -253,7 +490,7 @@ function renderActivitySessionChart() {
   const total = rows.reduce((sum, item) => sum + item.count, 0);
   const max = Math.max(1, ...rows.map((item) => item.count));
   if (!rows.length) {
-    el.innerHTML = emptyAnalytics("No agent sessions in this window");
+    el.innerHTML = emptyAnalytics(t("No agent sessions in this window"));
     return;
   }
   el.innerHTML = `
@@ -272,7 +509,7 @@ function renderActivitySessionChart() {
         `;
       }).join("")}
     </div>
-    <p class="muted analytics-footnote">${escapeHTML(formatTokens(total))} local events across top harnesses</p>
+    <p class="muted analytics-footnote">${escapeHTML(t("{count} local events across top harnesses", { count: formatTokens(total) }))}</p>
   `;
   $$("[data-activity-harness]").forEach((button) => {
     button.addEventListener("click", () => applyFilters({ harness: button.dataset.activityHarness }, { reset: true }));
@@ -283,11 +520,11 @@ function renderActivityAttention() {
   const el = $("#activity-attention");
   if (!el) return;
   const items = [
-    { label: "Critical events flagged for review", value: state.summary?.critical_severity_events || 0, filters: { severity: "critical" }, tone: "danger" },
-    { label: "High-severity events to triage", value: state.summary?.high_severity_events || 0, filters: { severity: "high" }, tone: "danger" },
-    { label: "Failed tool calls", value: state.summary?.failed_tool_events || 0, filters: { action: "tool.failed" }, tone: "warn" },
-    { label: "Sessions awaiting review", value: state.summary?.needs_review_events || 0, filters: { review: "true" }, tone: "info" },
-    { label: "Denied or blocked actions", value: (state.summary?.denied_approval_events || 0) + (state.summary?.policy_blocked_events || 0), filters: { review: "true" }, tone: "danger" },
+    { label: t("Critical events flagged for review"), value: state.summary?.critical_severity_events || 0, filters: { severity: "critical" }, tone: "danger" },
+    { label: t("High-severity events to triage"), value: state.summary?.high_severity_events || 0, filters: { severity: "high" }, tone: "danger" },
+    { label: t("Failed tool calls"), value: state.summary?.failed_tool_events || 0, filters: { action: "tool.failed" }, tone: "warn" },
+    { label: t("Sessions awaiting review"), value: state.summary?.needs_review_events || 0, filters: { review: "true" }, tone: "info" },
+    { label: t("Denied or blocked actions"), value: (state.summary?.denied_approval_events || 0) + (state.summary?.policy_blocked_events || 0), filters: { review: "true" }, tone: "danger" },
   ];
   el.innerHTML = items
     .map((item, index) => `
@@ -307,26 +544,26 @@ function renderInsights() {
   if (!$("#insights")) return;
   const attention = attentionItems();
   const sections = [
-    ["What Needs Attention", attention, "attention"],
-    ["Agent Harnesses", state.summary?.top_harnesses || []],
-    ["Models", state.summary?.top_models || []],
-    ["Top Actions", state.summary?.top_actions || []],
-    ["Top Repositories", state.summary?.top_repositories || []],
-    ["MCP Servers", state.summary?.top_mcp_servers || []],
+    [t("What Needs Attention"), attention, "attention"],
+    [t("Agent Harnesses"), state.summary?.top_harnesses || []],
+    [t("Models"), state.summary?.top_models || []],
+    [t("Top Actions"), state.summary?.top_actions || []],
+    [t("Top Repositories"), state.summary?.top_repositories || []],
+    [t("MCP Servers"), state.summary?.top_mcp_servers || []],
   ];
   $("#insights").innerHTML = sections
     .map(([title, values, tone]) => `
       <div class="panel insight">
         <h2>${escapeHTML(title)}</h2>
         <div class="stack">
-          ${values.length ? values.map((item, index) => `<button type="button" class="${tone === "attention" ? "attention-item" : ""}" data-insight="${escapeHTML(title)}" data-index="${index}" data-value="${escapeHTML(item.name)}"><span>${escapeHTML(item.name)}</span><strong>${escapeHTML(item.count)}</strong></button>`).join("") : `<span class="muted">No data yet</span>`}
+          ${values.length ? values.map((item, index) => `<button type="button" class="${tone === "attention" ? "attention-item" : ""}" data-insight="${escapeHTML(title)}" data-index="${index}" data-value="${escapeHTML(item.name)}"><span>${escapeHTML(item.name)}</span><strong>${escapeHTML(item.count)}</strong></button>`).join("") : `<span class="muted">${escapeHTML(t("No data yet"))}</span>`}
         </div>
       </div>
     `)
     .join("");
   $$("[data-insight]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (button.dataset.insight === "What Needs Attention") {
+      if (button.dataset.insight === t("What Needs Attention")) {
         const item = attention[Number(button.dataset.index)];
         if (item?.filters) applyFilters(item.filters, { reset: true });
         return;
@@ -343,13 +580,14 @@ function renderSearchState() {
   const returned = result.returned ?? (isSessionsPage ? state.sessions.length : state.events.length);
   const total = isSessionsPage ? (result.total_sessions ?? 0) : (result.total_matched ?? 0);
   const unit = isSessionsPage ? "session" : "event";
-  const suffix = isSessionsPage && result.events_matched !== undefined ? ` (${result.events_matched} matching events)` : "";
-  $("#result-meta").textContent = state.loading ? "Loading..." : `${returned} shown of ${total} matched ${unit}${total === 1 ? "" : "s"}${suffix}`;
+  const suffix = isSessionsPage && result.events_matched !== undefined ? t(" ({count} matching events)", { count: result.events_matched }) : "";
+  const displayUnit = window.BeaconI18n.language === "zh-CN" ? t(isSessionsPage ? "Session" : "Events") : `${unit}${total === 1 ? "" : "s"}`;
+  $("#result-meta").textContent = state.loading ? t("Loading...") : t("{shown} shown of {total} matched {unit}", { shown: returned, total, unit: displayUnit }) + suffix;
 
   const notice = $("#notice");
   if (state.error) {
     notice.hidden = false;
-    notice.textContent = `Failed to load dashboard: ${state.error.message}`;
+    notice.textContent = t("Failed to load dashboard: {error}", { error: state.error.message });
   } else if (result.truncated) {
     notice.hidden = false;
     notice.textContent = `Showing the latest ${returned} matching ${unit}${returned === 1 ? "" : "s"}. Narrow the search or raise the limit to see more.`;
@@ -402,7 +640,7 @@ async function loadSessionPage() {
 }
 
 function renderSessionPage() {
-  setText("#log-path", state.status?.log_path || "Runtime log unavailable");
+  setText("#log-path", state.status?.log_path || t("Runtime log unavailable"));
   const detail = state.sessionDetail || {};
   if (state.error && !state.sessionDetail) {
     setSessionDetailViewState("error", `Failed to load session: ${state.error.message}`);
@@ -427,32 +665,32 @@ function setSessionDetailViewState(mode, message = "") {
   status.classList.toggle("error", mode === "error");
   setText(
     "#session-detail-status-message",
-    message || (mode === "loading" ? "Loading session details..." : ""),
+    message || (mode === "loading" ? t("Loading session details...") : ""),
   );
 }
 
 const internalSessionCategories = ["inventory", "validation", "metric"];
 
 const sessionTypeOptions = [
-  ["", "All types"],
-  ["prompt", "Prompt"],
-  ["tool", "Tool"],
-  ["command", "Command"],
-  ["file", "File"],
+  ["", t("All types")],
+  ["prompt", t("Prompt")],
+  ["tool", t("Tool")],
+  ["command", t("Command")],
+  ["file", t("File")],
   ["mcp", "MCP"],
-  ["approval", "Approval"],
-  ["session", "Session"],
-  ["inventory", "Inventory"],
-  ["validation", "Validation"],
+  ["approval", t("Approval")],
+  ["session", t("Session")],
+  ["inventory", t("Inventory")],
+  ["validation", t("Validation")],
 ];
 
 const sessionSeverityOptions = [
-  ["", "All severities"],
-  ["info", "Info"],
-  ["low", "Low"],
-  ["medium", "Medium"],
-  ["high", "High"],
-  ["critical", "Critical"],
+  ["", t("All severities")],
+  ["info", t("Info")],
+  ["low", t("Low")],
+  ["medium", t("Medium")],
+  ["high", t("High")],
+  ["critical", t("Critical")],
 ];
 
 function renderSessionEventFilters() {
@@ -470,8 +708,8 @@ function renderSessionEventFilters() {
   const actionFilters = $("#session-action-filters");
   if (actionFilters) {
     actionFilters.innerHTML = `
-      <button type="button" class="${filters.destructive ? "" : "active"}" data-session-destructive="false">All actions</button>
-      <button type="button" class="${filters.destructive ? "active" : ""}" data-session-destructive="true">Contains destructive action</button>
+      <button type="button" class="${filters.destructive ? "" : "active"}" data-session-destructive="false">${escapeHTML(t("All actions"))}</button>
+      <button type="button" class="${filters.destructive ? "active" : ""}" data-session-destructive="true">${escapeHTML(t("Contains destructive action"))}</button>
     `;
   }
   $$("[data-session-event-type]").forEach((button) => {
@@ -497,7 +735,7 @@ function renderSessionEventFilters() {
   });
   const internal = $("#toggle-internal-events");
   if (internal) {
-    internal.textContent = filters.showInternal ? "Hide internal events" : "Show internal events";
+    internal.textContent = filters.showInternal ? t("Hide internal events") : t("Show internal events");
     internal.classList.toggle("active", filters.showInternal);
     internal.onclick = () => {
       filters.showInternal = !filters.showInternal;
@@ -521,13 +759,13 @@ function renderSessionEventTable() {
   if (!tbody) return;
   const records = filteredSessionEvents();
   const filters = state.sessionEventFilters;
-  const typeLabel = sessionTypeOptions.find(([value]) => value === filters.type)?.[1] || "All types";
-  const severityLabel = sessionSeverityOptions.find(([value]) => value === filters.severity)?.[1] || "All severities";
-  const actionLabel = filters.destructive ? "Destructive" : "All";
+  const typeLabel = sessionTypeOptions.find(([value]) => value === filters.type)?.[1] || t("All types");
+  const severityLabel = sessionSeverityOptions.find(([value]) => value === filters.severity)?.[1] || t("All severities");
+  const actionLabel = filters.destructive ? "Destructive" : t("All");
   const runtimeLabel = filters.showInternal || internalSessionCategories.includes(filters.type) ? "internal shown" : "internal hidden";
   setText("#result-meta", `Type: ${typeLabel} · Severity: ${severityLabel} · Action: ${actionLabel} · Runtime: ${runtimeLabel} · ${records.length} of ${state.events.length} events`);
   if (!records.length) {
-    tbody.innerHTML = `<tr><td colspan="11" class="muted">No events match these filters.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11" class="muted">${escapeHTML(t("No events match these filters."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = records.map(({ record, index }) => sessionEventRowHTML(record, index)).join("");
@@ -584,13 +822,13 @@ function sessionEventRowHTML(record, index) {
       </td>
       <td class="session-event-value">
         <span>${escapeHTML(truncateMiddle(value, 180) || "-")}</span>
-        ${value ? `<button type="button" class="session-value-button" data-session-value-index="${index}">View full ${escapeHTML(sessionValueKind(event))}</button>` : ""}
+        ${value ? `<button type="button" class="session-value-button" data-session-value-index="${index}">${escapeHTML(t("View full {kind}", { kind: displayEventKind(sessionValueKind(event)) }))}</button>` : ""}
       </td>
       <td>${sessionUsageValue(usage.input_tokens)}</td>
       <td>${sessionUsageValue(usage.output_tokens)}</td>
       <td>${sessionUsageValue(usage.cache_creation?.input_tokens)}</td>
       <td>${sessionUsageValue(usage.cache_read?.input_tokens)}</td>
-      <td><button type="button" class="session-json-button" data-session-json-index="${index}" aria-label="Inspect raw JSON for ${escapeHTML(action)}">JSON</button></td>
+      <td><button type="button" class="session-json-button" data-session-json-index="${index}" aria-label="${escapeHTML(t("Inspect raw JSON for {action}", { action }))}">JSON</button></td>
     </tr>
   `;
 }
@@ -624,6 +862,11 @@ function sessionSeverityPill(severity) {
 function sessionTypePill(type) {
   const normalized = String(type || "other").toLowerCase();
   return `<span class="session-type-pill session-type-${escapeHTML(normalized)}">${escapeHTML(normalized)}</span>`;
+}
+
+function displayEventKind(kind) {
+  const labels = { tool: t("Tool"), command: t("Command"), file: t("File"), prompt: t("Prompt"), approval: t("Approval"), decision: t("Approval"), value: t("Value"), reasoning: t("Reasoning") };
+  return window.BeaconI18n.language === "zh-CN" ? t(labels[kind] || kind) : kind;
 }
 
 function sessionActionLabel(event) {
@@ -727,7 +970,7 @@ async function loadInventory() {
 }
 
 function renderInventory(resp) {
-  setText("#log-path", state.status?.log_path || "Runtime log unavailable");
+  setText("#log-path", state.status?.log_path || t("Runtime log unavailable"));
   const harnesses = resp?.harnesses || [];
   const configs = resp?.configs || [];
   const servers = resp?.mcp_servers || [];
@@ -736,7 +979,7 @@ function renderInventory(resp) {
   const existingConfigs = configs.filter((config) => config.exists);
   const existingSkills = skills.filter((skill) => skill.exists);
   const hookConfigs = existingConfigs.filter((config) => config.config_kind === "hook_config");
-  setText("#inventory-meta", resp?.generated_at ? `Scanned ${formatTime(resp.generated_at)}` : "");
+  setText("#inventory-meta", resp?.generated_at ? t("Scanned {time}", { time: formatTime(resp.generated_at) }) : "");
   renderInventoryWorkspace(resp, { harnesses, configs, servers, skills, hooks, existingConfigs, existingSkills, hookConfigs });
   renderInventoryCards(harnesses, existingConfigs, servers, existingSkills, hookConfigs);
   renderInventoryHarnesses(harnesses);
@@ -751,10 +994,10 @@ function renderInventory(resp) {
 }
 
 const inventoryViewLabels = {
-  configs: "Configurations",
-  mcp: "MCP Servers",
-  skills: "Agent Skills",
-  hooks: "Hooks",
+  configs: t("Configurations"),
+  mcp: t("MCP Servers"),
+  skills: t("Agent Skills"),
+  hooks: t("Hooks"),
 };
 
 const inventoryRuntimeLogos = {
@@ -898,7 +1141,7 @@ function renderInventoryFilterOptions(ctx) {
   if (userSelect) {
     const identity = inventoryIdentity();
     userSelect.innerHTML = `
-      <option value="">All users</option>
+      <option value="">${escapeHTML(t("All users"))}</option>
       <option value="${escapeHTML(identity.user)}"${state.inventoryUser === identity.user ? " selected" : ""}>${escapeHTML(identity.user)}</option>
     `;
   }
@@ -909,7 +1152,7 @@ function renderInventoryFilterOptions(ctx) {
       state.inventoryRuntime = "";
       updateInventoryURL();
     }
-    runtimeSelect.innerHTML = `<option value="">All runtimes</option>` + runtimes
+    runtimeSelect.innerHTML = `<option value="">${escapeHTML(t("All runtimes"))}</option>` + runtimes
       .map((value) => `<option value="${escapeHTML(value)}"${state.inventoryRuntime === value ? " selected" : ""}>${escapeHTML(runtimeLabel(value))}</option>`)
       .join("");
   }
@@ -948,7 +1191,7 @@ function renderInventoryActiveTable(ctx) {
     .sort(compareInventoryRows);
   head.innerHTML = `<tr>${table.columns.map((column) => `<th>${escapeHTML(column.label)}</th>`).join("")}</tr>`;
   if (!rows.length) {
-    body.innerHTML = `<tr><td colspan="${table.columns.length}" class="muted">No matching rows were found in the latest Beacon inventory snapshot.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="${table.columns.length}" class="muted">${escapeHTML(t("No matching rows were found in the latest Beacon inventory snapshot."))}</td></tr>`;
     return;
   }
   body.innerHTML = rows
@@ -959,21 +1202,21 @@ function renderInventoryActiveTable(ctx) {
 function inventorySearchPlaceholder(view) {
   switch (view) {
     case "mcp":
-      return "Search MCP servers by name, status, path, or command...";
+      return t("Search MCP servers by name, status, path, or command...");
     case "skills":
-      return "Search agent skills by name, status, path, or command...";
+      return t("Search agent skills by name, status, path, or command...");
     case "hooks":
-      return "Search hooks by name, status, path, or command...";
+      return t("Search hooks by name, status, path, or command...");
     case "configs":
     default:
-      return "Search configurations by name, status, path, or command...";
+      return t("Search configurations by name, status, path, or command...");
   }
 }
 
 function inventoryIdentityColumns() {
   return [
-    { label: "User", className: "nowrap", render: () => escapeHTML(inventoryIdentity().user) },
-    { label: "Device", className: "nowrap", render: () => escapeHTML(inventoryIdentity().device) },
+    { label: t("User"), className: "nowrap", render: () => escapeHTML(inventoryIdentity().user) },
+    { label: t("Device"), className: "nowrap", render: () => escapeHTML(inventoryIdentity().device) },
   ];
 }
 
@@ -982,68 +1225,68 @@ function inventoryTableForView(view, ctx) {
   switch (view) {
     case "mcp":
       return {
-        title: "MCP Servers",
+        title: t("MCP Servers"),
         description: "Model Context Protocol servers declared across discovered runtime configs. Secret-bearing env keys are filtered out.",
         columns: [
           ...inventoryIdentityColumns(),
-          { label: "Agent Runtime", render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
+          { label: t("Agent Runtime"), render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
           { label: "Server", render: (row) => escapeHTML(row.server_name || row.server_name_hash || "") },
-          { label: "Scope", render: (row) => badge(row.source_scope || "unknown", "badge-muted") },
-          { label: "Transport", render: (row) => badge(row.transport || "unknown", "badge-muted") },
-          { label: "Command", className: "mono", render: (row) => row.command_present ? escapeHTML(row.command_name || "yes") : `<span class="muted">-</span>` },
-          { label: "Args", render: (row) => escapeHTML(row.args_count ?? 0) },
-          { label: "Env Keys", render: envKeysCell },
-          { label: "Source SHA", className: "mono sha-cell", render: (row) => hashCell(sourceSHAs.get(row.source_path_hash)) },
-          { label: "Definition SHA", className: "mono sha-cell", render: (row) => hashCell(row.definition_hash) },
-          { label: "Source", className: "mono path-cell", render: (row) => escapeHTML(row.source_path || row.source_path_hash || "") },
+          { label: t("Scope"), render: (row) => badge(row.source_scope || "unknown", "badge-muted") },
+          { label: t("Transport"), render: (row) => badge(row.transport || "unknown", "badge-muted") },
+          { label: t("Command"), className: "mono", render: (row) => row.command_present ? escapeHTML(row.command_name || "yes") : `<span class="muted">-</span>` },
+          { label: t("Args"), render: (row) => escapeHTML(row.args_count ?? 0) },
+          { label: t("Env Keys"), render: envKeysCell },
+          { label: t("Source SHA"), className: "mono sha-cell", render: (row) => hashCell(sourceSHAs.get(row.source_path_hash)) },
+          { label: t("Definition SHA"), className: "mono sha-cell", render: (row) => hashCell(row.definition_hash) },
+          { label: t("Source"), className: "mono path-cell", render: (row) => escapeHTML(row.source_path || row.source_path_hash || "") },
         ],
       };
     case "skills":
       return {
-        title: "Agent Skills",
-        description: "Local skill manifests discovered under supported agent skill roots. Skill instruction bodies are not retained.",
+        title: t("Agent Skills"),
+        description: t("Local skill manifests discovered under supported agent skill roots. Skill instruction bodies are not retained."),
         columns: [
           ...inventoryIdentityColumns(),
-          { label: "Agent Runtime", render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
-          { label: "Skill", render: (row) => escapeHTML(row.skill_name || row.skill_name_hash || "") },
-          { label: "Scope", render: (row) => badge(row.source_scope || "unknown", "badge-muted") },
-          { label: "Status", render: parserBadge },
-          { label: "Modified", className: "nowrap", render: (row) => row.modified_at ? escapeHTML(formatTime(row.modified_at)) : `<span class="muted">-</span>` },
-          { label: "Manifest SHA", className: "mono sha-cell", render: (row) => hashCell(row.file_sha256) },
-          { label: "Manifest", className: "mono path-cell", render: (row) => escapeHTML(row.manifest_path || row.manifest_path_hash || row.root_path || row.root_path_hash || "") },
+          { label: t("Agent Runtime"), render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
+          { label: t("Skill"), render: (row) => escapeHTML(row.skill_name || row.skill_name_hash || "") },
+          { label: t("Scope"), render: (row) => badge(row.source_scope || "unknown", "badge-muted") },
+          { label: t("Status"), render: parserBadge },
+          { label: t("Modified"), className: "nowrap", render: (row) => row.modified_at ? escapeHTML(formatTime(row.modified_at)) : `<span class="muted">-</span>` },
+          { label: t("Manifest SHA"), className: "mono sha-cell", render: (row) => hashCell(row.file_sha256) },
+          { label: t("Manifest"), className: "mono path-cell", render: (row) => escapeHTML(row.manifest_path || row.manifest_path_hash || row.root_path || row.root_path_hash || "") },
         ],
       };
     case "hooks":
       return {
-        title: "Hook Configurations",
-        description: "Hook manifests discovered across supported runtimes. Hook command bodies are not shown here.",
+        title: t("Hook Configurations"),
+        description: t("Hook manifests discovered across supported runtimes. Hook command bodies are not shown here."),
         columns: [
           ...inventoryIdentityColumns(),
-          { label: "Agent Runtime", render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
-          { label: "Scope", render: (row) => row.source_scope || row.scope ? badge(row.source_scope || row.scope, "badge-muted") : `<span class="muted">-</span>` },
-          { label: "Status", render: (row) => badge(row.status || (row.installed ? "configured" : "not_installed"), row.installed ? "badge-ok" : "badge-muted") },
-          { label: "Beacon Cloud", render: (row) => row.beacon_managed ? badge("managed", "badge-ok") : `<span class="muted">no</span>` },
-          { label: "Modified", className: "nowrap", render: (row) => row.modified_at ? escapeHTML(formatTime(row.modified_at)) : `<span class="muted">-</span>` },
-          { label: "Manifest SHA", className: "mono sha-cell", render: (row) => hashCell(row.file_sha256 || row.path_hash) },
-          { label: "Manifest", className: "mono path-cell", render: (row) => escapeHTML(row.path || row.path_hash || "") },
+          { label: t("Agent Runtime"), render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
+          { label: t("Scope"), render: (row) => row.source_scope || row.scope ? badge(row.source_scope || row.scope, "badge-muted") : `<span class="muted">-</span>` },
+          { label: t("Status"), render: (row) => badge(row.status || (row.installed ? "configured" : "not_installed"), row.installed ? "badge-ok" : "badge-muted") },
+          { label: t("Beacon Cloud"), render: (row) => row.beacon_managed ? badge("managed", "badge-ok") : `<span class="muted">no</span>` },
+          { label: t("Modified"), className: "nowrap", render: (row) => row.modified_at ? escapeHTML(formatTime(row.modified_at)) : `<span class="muted">-</span>` },
+          { label: t("Manifest SHA"), className: "mono sha-cell", render: (row) => hashCell(row.file_sha256 || row.path_hash) },
+          { label: t("Manifest"), className: "mono path-cell", render: (row) => escapeHTML(row.path || row.path_hash || "") },
         ],
       };
     case "configs":
     default:
       return {
-        title: "Agent Runtime Configurations",
-        description: "Config, hook, plugin, and profile files found on this endpoint. Paths and hashes only; file contents are never read into the dashboard.",
+        title: t("Agent Runtime Configurations"),
+        description: t("Config, hook, plugin, and profile files found on this endpoint. Paths and hashes only; file contents are never read into the dashboard."),
         columns: [
           ...inventoryIdentityColumns(),
-          { label: "Agent Runtime", render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
-          { label: "Scope", render: (row) => badge(row.scope || "unknown", "badge-muted") },
-          { label: "Kind", render: (row) => escapeHTML(configKindLabel(row.config_kind)) },
-          { label: "Parser", render: parserBadge },
+          { label: t("Agent Runtime"), render: (row) => inventoryRuntimeCell(inventoryRuntimeValue(row)) },
+          { label: t("Scope"), render: (row) => badge(row.scope || "unknown", "badge-muted") },
+          { label: t("Kind"), render: (row) => escapeHTML(configKindLabel(row.config_kind)) },
+          { label: t("Parser"), render: parserBadge },
           { label: "MCP", render: (row) => escapeHTML(row.mcp_server_count ?? 0) },
-          { label: "Beacon Cloud", render: (row) => row.beacon_managed ? badge("managed", "badge-ok") : `<span class="muted">no</span>` },
-          { label: "Modified", className: "nowrap", render: (row) => row.modified_at ? escapeHTML(formatTime(row.modified_at)) : `<span class="muted">-</span>` },
-          { label: "Manifest SHA", className: "mono sha-cell", render: (row) => hashCell(row.file_sha256) },
-          { label: "Path", className: "mono path-cell", render: (row) => escapeHTML(row.path || row.path_hash || "") },
+          { label: t("Beacon Cloud"), render: (row) => row.beacon_managed ? badge("managed", "badge-ok") : `<span class="muted">no</span>` },
+          { label: t("Modified"), className: "nowrap", render: (row) => row.modified_at ? escapeHTML(formatTime(row.modified_at)) : `<span class="muted">-</span>` },
+          { label: t("Manifest SHA"), className: "mono sha-cell", render: (row) => hashCell(row.file_sha256) },
+          { label: t("Path"), className: "mono path-cell", render: (row) => escapeHTML(row.path || row.path_hash || "") },
         ],
       };
   }
@@ -1095,7 +1338,7 @@ function inventoryIdentity() {
   const user = titleCasePathBase(home) || "Local user";
   return {
     user,
-    device: "Local endpoint",
+    device: t("Local endpoint"),
   };
 }
 
@@ -1163,10 +1406,10 @@ function renderInventoryCards(harnesses, configs, servers, skills = [], hooks = 
   const managed = configs.filter((config) => config.beacon_managed).length;
   const cards = [
     { label: "Detected Runtimes", value: detected, hint: `${harnesses.length} probed` },
-    { label: "Telemetry Enabled", value: enabled, hint: "reporting to Beacon" },
+    { label: "Telemetry Enabled", value: enabled, hint: t("reporting to Beacon") },
     { label: "Config Files", value: configs.length, hint: `${managed} Beacon-managed` },
-    { label: "MCP Servers", value: servers.length, hint: "across all configs" },
-    { label: "Agent Skills", value: skills.length, hint: "local manifests" },
+    { label: t("MCP Servers"), value: servers.length, hint: "across all configs" },
+    { label: t("Agent Skills"), value: skills.length, hint: "local manifests" },
     { label: "Hook Configs", value: hooks.length, hint: "discovered manifests" },
   ];
   $("#inventory-cards").innerHTML = cards
@@ -1184,7 +1427,7 @@ function renderInventoryHarnesses(harnesses) {
   const el = $("#inventory-harnesses");
   if (!el) return;
   if (!harnesses.length) {
-    el.innerHTML = `<p class="muted">No runtimes probed.</p>`;
+    el.innerHTML = `<p class="muted">${escapeHTML(t("No runtimes probed."))}</p>`;
     return;
   }
   el.innerHTML = harnesses
@@ -1219,7 +1462,7 @@ function renderInventoryConfigs(configs) {
   const showAll = $("#inventory-show-all")?.checked;
   const rows = (configs || []).filter((config) => showAll || config.exists);
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="muted">No configuration files discovered.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="muted">${escapeHTML(t("No configuration files discovered."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = rows
@@ -1243,7 +1486,7 @@ function renderInventoryMCP(servers, configs = []) {
   const tbody = $("#inventory-mcp");
   if (!tbody) return;
   if (!servers.length) {
-    tbody.innerHTML = `<tr><td colspan="10" class="muted">No MCP servers declared in discovered configs.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="muted">${escapeHTML(t("No MCP servers declared in discovered configs."))}</td></tr>`;
     return;
   }
   const sourceSHAs = configSHAsByPathHash(configs);
@@ -1269,7 +1512,7 @@ function renderInventorySkills(skills) {
   const tbody = $("#inventory-skills");
   if (!tbody) return;
   if (!skills.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">No agent skills discovered in supported local roots.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No agent skills discovered in supported local roots."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = skills
@@ -1298,7 +1541,7 @@ function renderInventoryHooks(hooks, configs = []) {
     message: "",
   }));
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">No hook configuration manifests discovered.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No hook configuration manifests discovered."))}</td></tr>`;
     return;
   }
   const configByPath = configsByPath(configs);
@@ -1313,7 +1556,7 @@ function renderInventoryHooks(hooks, configs = []) {
           <td>${config.beacon_managed ? badge("managed", "badge-ok") : `<span class="muted">no</span>`}</td>
           <td class="nowrap">${config.modified_at ? escapeHTML(formatTime(config.modified_at)) : `<span class="muted">-</span>`}</td>
           <td class="mono sha-cell">${hashCell(config.file_sha256)}</td>
-          <td class="mono path-cell">${escapeHTML(hook.path || config.path || config.path_hash || "")}${hook.message ? `<br /><span class="muted">${escapeHTML(hook.message)}</span>` : ""}</td>
+          <td class="mono path-cell">${escapeHTML(hook.path || config.path || config.path_hash || "")}${hook.message ? `<br /><span class="muted">${escapeHTML(inventoryMessage(hook.message))}</span>` : ""}</td>
         </tr>
       `;
     })
@@ -1328,10 +1571,10 @@ function renderHookInventoryCards(hooks, hookConfigs) {
   const installed = hooks.filter((hook) => hook.installed).length;
   const managed = hookConfigs.filter((config) => config.beacon_managed).length;
   const cards = [
-    { label: "Hook Targets", value: hooks.length, hint: "runtimes probed" },
-    { label: "Hooks Installed", value: installed, hint: "reporting to Beacon" },
-    { label: "Hook Manifests", value: hookConfigs.length, hint: "discovered files" },
-    { label: "Beacon Cloud", value: managed, hint: "managed manifests" },
+    { label: t("Hook Targets"), value: hooks.length, hint: t("runtimes probed") },
+    { label: t("Hooks Installed"), value: installed, hint: t("reporting to Beacon") },
+    { label: t("Hook Manifests"), value: hookConfigs.length, hint: t("discovered files") },
+    { label: t("Beacon Cloud"), value: managed, hint: t("managed manifests") },
   ];
   el.innerHTML = cards
     .map((card) => `
@@ -1348,7 +1591,7 @@ function renderHookTargets(hooks, configs = []) {
   const tbody = $("#hook-targets");
   if (!tbody) return;
   if (!hooks.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">No hook targets probed.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No hook targets probed."))}</td></tr>`;
     return;
   }
   const configByPath = configsByPath(configs);
@@ -1363,7 +1606,7 @@ function renderHookTargets(hooks, configs = []) {
           <td>${config.beacon_managed ? badge("managed", "badge-ok") : `<span class="muted">no</span>`}</td>
           <td class="mono path-cell">${hook.binary_path ? escapeHTML(hook.binary_path) : `<span class="muted">-</span>`}</td>
           <td class="mono path-cell">${hook.path ? escapeHTML(hook.path) : `<span class="muted">-</span>`}</td>
-          <td>${hook.message ? `<span class="muted">${escapeHTML(hook.message)}</span>` : `<span class="muted">-</span>`}</td>
+          <td>${hook.message ? `<span class="muted">${escapeHTML(inventoryMessage(hook.message))}</span>` : `<span class="muted">-</span>`}</td>
         </tr>
       `;
     })
@@ -1374,7 +1617,7 @@ function renderHookManifests(hookConfigs) {
   const tbody = $("#hook-manifests");
   if (!tbody) return;
   if (!hookConfigs.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">No hook configuration manifests discovered.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No hook configuration manifests discovered."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = hookConfigs
@@ -1396,13 +1639,13 @@ function renderInventoryScope(scope) {
   const el = $("#inventory-scope");
   if (!el) return;
   const rows = [
-    ["Mode", scope.mode || ""],
-    ["Home", scope.home_path || ""],
-    ["Working directory", scope.working_dir || ""],
+    [t("Mode"), scope.mode || ""],
+    [t("Home"), scope.home_path || ""],
+    [t("Working directory"), scope.working_dir || ""],
   ].filter(([, value]) => value);
   el.innerHTML = rows.length
     ? rows.map(([key, value]) => `<div><span class="muted">${escapeHTML(key)}</span><strong class="mono">${escapeHTML(value)}</strong></div>`).join("")
-    : `<p class="muted">No scope information.</p>`;
+    : `<p class="muted">${escapeHTML(t("No scope information."))}</p>`;
 }
 
 function telemetryBadge(status, detected) {
@@ -1484,18 +1727,18 @@ function runtimeLabel(value) {
     qwen: "Qwen Code",
     qwen_code: "Qwen Code",
     vercel_fx: "fx (Vercel Labs)",
-    agent_skills: "Agent Skills",
+    agent_skills: t("Agent Skills"),
   };
   return labels[value] || harnessLabel(value);
 }
 
 function configKindLabel(kind) {
   const labels = {
-    native_config: "Native config",
-    hook_config: "Hook config",
-    plugin: "Plugin",
-    profile: "Shell profile",
-    managed_config: "Managed config",
+    native_config: t("Native config"),
+    hook_config: t("Hook config"),
+    plugin: t("Plugin"),
+    profile: t("Shell profile"),
+    managed_config: t("Managed config"),
   };
   return labels[kind] || kind || "unknown";
 }
@@ -1515,7 +1758,13 @@ function renderSessions() {
     return;
   }
   if (!state.sessions.length) {
-    $("#events").innerHTML = `<tr><td colspan="9">No sessions match this search. Clear filters or broaden the query.</td></tr>`;
+    const usageOnlyPick =
+      state.usageOnlyAgents?.has($("#harness-filter")?.value) ||
+      state.usageOnlyModels?.has($("#model-filter")?.value);
+    const usageOnlyNote = usageOnlyPick
+      ? `<tr><td colspan="9" class="muted">${escapeHTML(t("Usage snapshot only: the runtime event log has no session events for this filter."))}</td></tr>`
+      : "";
+    $("#events").innerHTML = `<tr><td colspan="9">${escapeHTML(t("No sessions match this search. Clear filters or broaden the query."))}</td></tr>${usageOnlyNote}`;
     return;
   }
   $("#events").innerHTML = state.sessions
@@ -1531,7 +1780,7 @@ function sessionRowHTML(session) {
   const models = uniqueValues([...(session.models || []), session.model]);
   const prompt = session.original_prompt
     ? escapeHTML(truncateMiddle(session.original_prompt, 180))
-    : `<span class="muted">No prompt captured</span>`;
+    : `<span class="muted">${escapeHTML(t("No prompt captured"))}</span>`;
   return `
     <tr class="row-link" data-session-id="${escapeHTML(session.id)}">
       <td class="mono"><a class="cell-link" href="${escapeHTML(sessionPageURL(session.id))}">${escapeHTML(formatSessionID(session.id))}</a></td>
@@ -1575,7 +1824,7 @@ function sessionSharingRowHTML(sharing) {
     : escapeHTML(sharing.url);
   const detail = [sharing.visibility, stale ? "stale: newer local activity" : "up to date"].filter(Boolean).join(" · ");
   const hint = sharing.refresh_command
-    ? `<span class="session-share-hint"><code>${escapeHTML(sharing.refresh_command)}</code> <button type="button" class="copy-share-refresh" data-command="${escapeHTML(sharing.refresh_command)}">Copy</button></span>`
+    ? `<span class="session-share-hint"><code>${escapeHTML(sharing.refresh_command)}</code> <button type="button" class="copy-share-refresh" data-command="${escapeHTML(sharing.refresh_command)}">${escapeHTML(t("Copy"))}</button></span>`
     : "";
   return `${link}<small>${escapeHTML(detail)}</small>${hint}`;
 }
@@ -1586,11 +1835,11 @@ function bindShareRefreshCopy(scope = document) {
       event.stopPropagation();
       try {
         await navigator.clipboard.writeText(button.dataset.command || "");
-        button.textContent = "Copied";
+        button.textContent = t("Copied");
       } catch (_) {
         button.textContent = "Copy failed";
       }
-      window.setTimeout(() => { button.textContent = "Copy"; }, 1400);
+      window.setTimeout(() => { button.textContent = t("Copy"); }, 1400);
     };
   });
 }
@@ -1616,7 +1865,7 @@ function closeDrawer() {
 }
 
 function renderLoading() {
-  setText("#result-meta", "Loading...");
+  setText("#result-meta", t("Loading..."));
   const columns = isSessionDetailPage ? 11 : (isSessionsPage ? 9 : 8);
   if ($("#events")) $("#events").innerHTML = `<tr><td colspan="${columns}">Loading ${isSessionsPage ? "sessions" : "events"}...</td></tr>`;
 }
@@ -1644,9 +1893,9 @@ function sessionHarnessCell(session) {
 
 function captureMethodLabel(value) {
   const labels = {
-    hook: "Hooks",
+    hook: t("Hooks"),
     otlp: "OpenTelemetry",
-    plugin: "Plugin",
+    plugin: t("Plugin"),
     poll: "Poll",
   };
   return labels[String(value).toLowerCase()] || value;
@@ -1691,7 +1940,7 @@ function sessionActivitySummary(session) {
   const ariaLabel = `${totalLabel}; ${items.filter(([, count]) => count > 0).map(([label, count]) => `${formatTokens(count)} ${label}`).join(", ") || "session lifecycle events"}`;
   return `
     <div class="session-activity-summary" aria-label="${escapeHTML(ariaLabel)}">
-      <div class="session-activity-total"><strong>${escapeHTML(formatTokens(eventCount))}</strong><span>event${eventCount === 1 ? "" : "s"}</span></div>
+      <div class="session-activity-total"><strong>${escapeHTML(formatTokens(eventCount))}</strong><span>${escapeHTML(t("Events"))}</span></div>
       <svg class="session-activity-track" aria-hidden="true" preserveAspectRatio="none" viewBox="0 0 100 1">${segmentRects}</svg>
       <div class="session-activity-detail">${escapeHTML(detailLabel)}</div>
     </div>
@@ -1719,23 +1968,23 @@ function detailSummary(record) {
   const info = event.event || {};
   const rows = [
     ["Action", signalAction(record)],
-    ["Category", info.category],
-    ["Severity", event.severity],
+    [t("Category"), info.category],
+    [t("Severity"), event.severity],
     ["Wazuh level", record.wazuh_level || ""],
-    ["Harness", event.harness?.name],
-    ["Model", event.model],
-    ["Session", event.session?.id],
-    ["Repository", repositoryLabel(event)],
-    ["Prompt", event.prompt?.text],
+    [t("Harness"), event.harness?.name],
+    [t("Model"), event.model],
+    [t("Session"), event.session?.id],
+    [t("Repository"), repositoryLabel(event)],
+    [t("Prompt"), event.prompt?.text],
     ["Artifact", event.prompt?.text ? "" : primaryArtifact(event)],
-    ["Approval", event.approval ? [event.approval.decision, event.approval.reason].filter(Boolean).join(": ") : ""],
+    [t("Approval"), event.approval ? [event.approval.decision, event.approval.reason].filter(Boolean).join(": ") : ""],
     ["Policy", event.policy ? [event.policy.decision, event.policy.name, event.policy.reason].filter(Boolean).join(": ") : ""],
     ["Content", event.content ? `${event.content.retention}${event.content.redacted ? ", redacted" : ""}${event.content.truncated ? ", truncated" : ""}` : ""],
   ].filter(([, value]) => value);
   return rows
     .map(([label, value]) => {
       const key = detailFilterKey(label);
-      const displayValue = label === "Session" ? formatSessionID(value) : value;
+      const displayValue = label === t("Session") ? formatSessionID(value) : value;
       return `
         <div>
           <span class="muted">${escapeHTML(label)}</span>
@@ -1756,19 +2005,21 @@ function renderSessionOverview(detail) {
   const harness = session.harness || firstNonEmpty(events.map((event) => event.harness?.name)) || "agent";
   const start = session.first_event_at || firstEvent.timestamp;
   const end = session.last_event_at || events[events.length - 1]?.timestamp;
-  const title = `${possessive(userName)} ${harnessLabel(harness)} session${sessionDateTitle(start, end)}`;
+  const title = window.BeaconI18n.language === "zh-CN"
+    ? t("{user} · {harness} session", { user: userName, harness: harnessLabel(harness) })
+    : `${possessive(userName)} ${harnessLabel(harness)} session${sessionDateTitle(start, end)}`;
   setText("#session-page-title", title);
   setText("#session-full-id", session.id || "");
   setText("#session-time-range", sessionTimeRange(start, end));
-  const promptText = session.original_prompt || "No prompt captured";
+  const promptText = session.original_prompt || t("No prompt captured");
   setText("#session-prompt", promptText);
   setText("#session-prompt-dialog-content", promptText);
 
   const badges = [
     session.review_count
       ? `<span class="session-badge session-badge-risk">${escapeHTML(session.review_count)} event${session.review_count === 1 ? "" : "s"} need review</span>`
-      : `<span class="session-badge session-badge-ok">No high risk events</span>`,
-    `<span class="session-badge session-badge-info">${escapeHTML(session.event_count || records.length)} events captured</span>`,
+      : `<span class="session-badge session-badge-ok">${escapeHTML(t("No high risk events"))}</span>`,
+    `<span class="session-badge session-badge-info">${escapeHTML(t("{count} events captured", { count: session.event_count || records.length }))}</span>`,
   ];
   if (session.sharing && session.sharing.url) {
     badges.push(session.sharing.state === "stale"
@@ -1786,28 +2037,28 @@ function renderSessionMetadata(session, events) {
   const userName = firstNonEmpty(events.map((event) => event.user?.name)) || "Local user";
   const device = firstNonEmpty(events.map((event) => event.endpoint?.hostname))
     || firstNonEmpty(events.map((event) => event.endpoint?.os))
-    || "Local endpoint";
+    || t("Local endpoint");
   const harness = session.harness || firstNonEmpty(events.map((event) => event.harness?.name)) || "-";
   const methods = uniqueValues(events.map((event) => event.harness?.collection_method)).map(captureMethodLabel);
   const models = uniqueValues(events.map((event) => event.model));
   const usage = sessionUsage(events);
   const rows = [
     {
-      label: "User",
+      label: t("User"),
       value: `<span class="session-person"><i>${escapeHTML(userName.slice(0, 1).toUpperCase())}</i>${escapeHTML(userName)}</span>`,
     },
-    { label: "Environment", value: `<span class="session-meta-pill">Endpoint</span>` },
-    { label: "Device", value: `<span class="session-device"><i aria-hidden="true"></i>${escapeHTML(device)}</span>` },
+    { label: t("Environment"), value: `<span class="session-meta-pill">${escapeHTML(t("Endpoint"))}</span>` },
+    { label: t("Device"), value: `<span class="session-device"><i aria-hidden="true"></i>${escapeHTML(device)}</span>` },
     {
-      label: "Harness",
+      label: t("Harness"),
       value: `${sessionHarnessCell({ harness })}${methods.length ? `<small>${escapeHTML(methods.join(", "))}</small>` : ""}`,
       className: "session-meta-harness",
     },
-    { label: "Model", value: models.length ? escapeHTML(models.join(", ")) : `<span class="muted">-</span>`, className: "mono" },
+    { label: t("Model"), value: models.length ? escapeHTML(models.join(", ")) : `<span class="muted">-</span>`, className: "mono" },
     { label: "Tokens", value: usage.tokens ? escapeHTML(formatCompactTokens(usage.tokens)) : `<span class="muted">-</span>` },
-    { label: "Reported Cost", value: usage.cost ? `$${escapeHTML(usage.cost.toFixed(4))}` : `<span class="muted">-</span>` },
-    { label: "Repository", value: session.repository ? escapeHTML(repositoryOptionLabel(session.repository)) : `<span class="muted">-</span>`, className: "mono" },
-    { label: "Branch", value: session.branch ? escapeHTML(session.branch) : `<span class="muted">-</span>`, className: "mono" },
+    { label: t("Reported Cost"), value: usage.cost ? `$${escapeHTML(usage.cost.toFixed(4))}` : `<span class="muted">-</span>` },
+    { label: t("Repository"), value: session.repository ? escapeHTML(repositoryOptionLabel(session.repository)) : `<span class="muted">-</span>`, className: "mono" },
+    { label: t("Branch"), value: session.branch ? escapeHTML(session.branch) : `<span class="muted">-</span>`, className: "mono" },
   ];
   if (session.sharing && session.sharing.url) {
     rows.push({ label: "Shared", value: sessionSharingRowHTML(session.sharing), className: "session-meta-sharing" });
@@ -1823,18 +2074,18 @@ function renderSessionMetadata(session, events) {
 
 function renderSessionActivity(session, records) {
   const categoryConfig = [
-    ["tool", "Tools", "#0ea5b7"],
-    ["command", "Commands", "#7c3aed"],
-    ["file", "Files", "#3b82f6"],
-    ["prompt", "Prompts", "#a855f7"],
-    ["approval", "Approvals", "#10b981"],
+    ["tool", t("Tools"), "#0ea5b7"],
+    ["command", t("Commands"), "#7c3aed"],
+    ["file", t("Files"), "#3b82f6"],
+    ["prompt", t("Prompts"), "#a855f7"],
+    ["approval", t("Approvals"), "#10b981"],
     ["mcp", "MCP", "#d946ef"],
-    ["other", "Other", "#cbd5e1"],
+    ["other", t("Other"), "#cbd5e1"],
   ];
   const counts = Object.fromEntries(categoryConfig.map(([key]) => [key, 0]));
   for (const record of records) counts[sessionEventCategory(record.event || {})]++;
   const duration = durationLabel(session.first_event_at, session.last_event_at);
-  setText("#session-activity-summary", `${duration} session · ${records.length} events · peak ${peakEventsPerBucket(records)} per interval`);
+  setText("#session-activity-summary", t("{duration} session · {count} events · peak {peak} per interval", { duration, count: records.length, peak: peakEventsPerBucket(records) }));
   $("#session-activity-legend").innerHTML = categoryConfig
     .filter(([key]) => counts[key] > 0)
     .map(([key, label, color]) => `<span><i data-session-color="${escapeHTML(color)}"></i>${escapeHTML(counts[key])} ${escapeHTML(label)}</span>`)
@@ -1879,7 +2130,7 @@ function renderSessionActivity(session, records) {
   }
   const severityMax = Math.max(1, ...Object.values(severities));
   $("#session-severity-breakdown").innerHTML = `
-    <h3>Breakdown by severity</h3>
+    <h3>${escapeHTML(t("Breakdown by severity"))}</h3>
     ${severityOrder.filter(([key]) => severities[key]).map(([key, color]) => `
       <div class="session-severity-row">
         <div><strong>${escapeHTML(titleCase(key))}</strong><span>${escapeHTML(severities[key])}</span></div>
@@ -1911,11 +2162,11 @@ function bindSessionOverviewActions(sessionID) {
     copy.onclick = async () => {
       try {
         await navigator.clipboard.writeText(sessionID);
-        copy.textContent = "Copied";
+        copy.textContent = t("Copied");
       } catch (_) {
         copy.textContent = "Copy failed";
       }
-      window.setTimeout(() => { copy.textContent = "Copy"; }, 1400);
+      window.setTimeout(() => { copy.textContent = t("Copy"); }, 1400);
     };
   }
   const toggle = $("#toggle-session-prompt");
@@ -2051,7 +2302,19 @@ function displayFilterValue(key, value) {
 }
 
 function badge(value, className) {
-  return `<span class="badge ${escapeHTML(className)}">${escapeHTML(value)}</span>`;
+  // Inventory statuses and scopes are a small closed vocabulary; translate when
+  // a key exists and keep the raw value for anything else (rule names, IDs).
+  return `<span class="badge ${escapeHTML(className)}">${escapeHTML(t(String(value)))}</span>`;
+}
+
+// Cursor-style harness inventory messages arrive from the backend in English;
+// map the one well-known sentence pattern and pass everything else verbatim.
+function inventoryMessage(message) {
+  const match = /^(.+?) endpoint hooks are (not )?installed$/.exec(String(message ?? "").trim());
+  if (!match) return message;
+  return match[2]
+    ? t("{name} endpoint hooks are not installed", { name: match[1] })
+    : t("{name} endpoint hooks are installed", { name: match[1] });
 }
 
 function formatTime(timestamp) {
@@ -2077,10 +2340,27 @@ function labelForParam(key) {
   return labels[key] || key.replaceAll("_", " ");
 }
 
+// Usage-only sources and models exist in local usage snapshots but never in the
+// runtime event log; list them so filters cover every known source without
+// pretending they have sessions to audit.
+function mergeUsageFacets(sessionFacets, usageFacets) {
+  const known = new Set((sessionFacets ?? []).map((item) => item.name));
+  const merged = [...(sessionFacets ?? [])];
+  for (const item of usageFacets ?? []) {
+    if (known.has(item.name)) continue;
+    merged.push({ name: item.name, count: item.count, usageOnly: true });
+  }
+  return merged;
+}
+
 function renderFilterOptions() {
   if (!$("#filters")) return;
-  renderHarnessSelect(state.summary?.top_harnesses || []);
-  renderModelSelect(state.summary?.top_models || []);
+  const harnesses = mergeUsageFacets(state.summary?.top_harnesses, state.summary?.usage_harnesses);
+  const models = mergeUsageFacets(state.summary?.top_models, state.summary?.usage_models);
+  state.usageOnlyAgents = new Set(harnesses.filter((item) => item.usageOnly).map((item) => item.name));
+  state.usageOnlyModels = new Set(models.filter((item) => item.usageOnly).map((item) => item.name));
+  renderHarnessSelect(harnesses);
+  renderModelSelect(models);
   renderRepositorySelect(state.summary?.top_repositories || []);
   renderDatalist("action-options", state.summary?.top_actions || []);
 }
@@ -2090,8 +2370,8 @@ function renderHarnessSelect(values) {
   if (!select) return;
   const current = select.value;
   const options = [
-    `<option value="">All agent harnesses</option>`,
-    ...values.map((item) => `<option value="${escapeHTML(item.name)}">${escapeHTML(harnessLabel(item.name))} (${escapeHTML(item.count)})</option>`),
+    `<option value="">${escapeHTML(t("All agent harnesses"))}</option>`,
+    ...values.map((item) => `<option value="${escapeHTML(item.name)}">${escapeHTML(item.usageOnly ? `${harnessLabel(item.name)} · ${t("{count} usage records", { count: item.count })}` : `${harnessLabel(item.name)} (${escapeHTML(item.count)})`)}</option>`),
   ];
   select.innerHTML = options.join("");
   ensureFacetOption(select, current);
@@ -2103,8 +2383,8 @@ function renderModelSelect(values) {
   if (!select) return;
   const current = select.value;
   const options = [
-    `<option value="">All models</option>`,
-    ...values.map((item) => `<option value="${escapeHTML(item.name)}">${escapeHTML(item.name)} (${escapeHTML(item.count)})</option>`),
+    `<option value="">${escapeHTML(t("All models"))}</option>`,
+    ...values.map((item) => `<option value="${escapeHTML(item.name)}">${escapeHTML(item.usageOnly ? `${item.name} · ${t("{count} usage records", { count: item.count })}` : `${item.name} (${escapeHTML(item.count)})`)}</option>`),
   ];
   select.innerHTML = options.join("");
   ensureFacetOption(select, current);
@@ -2116,7 +2396,7 @@ function renderRepositorySelect(values) {
   if (!select) return;
   const current = select.value;
   const options = [
-    `<option value="">All repositories</option>`,
+    `<option value="">${escapeHTML(t("All repositories"))}</option>`,
     ...values.map((item) => `<option value="${escapeHTML(item.name)}">${escapeHTML(repositoryOptionLabel(item.name))} (${escapeHTML(item.count)})</option>`),
   ];
   select.innerHTML = options.join("");
@@ -2147,6 +2427,12 @@ function harnessLabel(value) {
     codex_desktop: "Codex Desktop",
     copilot_cli: "GitHub Copilot CLI",
     grok: "Grok Build",
+    grok_bot: "Grok Bot",
+    zcode: "ZCode",
+    deepseek_harness: "DeepSeek Harness",
+    workbuddy: "WorkBuddy AI",
+    autoclaw: "AutoClaw",
+    doubao_work: "豆包工作 / Doubao Work",
     kiro: "Kiro",
     qwen_code: "Qwen Code",
     vercel_fx: "fx (Vercel Labs)",
@@ -2158,8 +2444,8 @@ function harnessLabel(value) {
 function renderFacets() {
   if (!$("#facets")) return;
   const groups = [
-    ["Harness", "harness", state.summary?.top_harnesses || []],
-    ["Model", "model", state.summary?.top_models || []],
+    [t("Harness"), "harness", state.summary?.top_harnesses || []],
+    [t("Model"), "model", state.summary?.top_models || []],
   ];
   $("#facets").innerHTML = groups
     .filter(([, , values]) => values.length)
@@ -2177,7 +2463,7 @@ function renderFacets() {
 
 function attentionItems() {
   const items = [
-    { name: "Needs review", count: state.summary?.needs_review_events || 0, filters: { review: "true" } },
+    { name: t("Needs review"), count: state.summary?.needs_review_events || 0, filters: { review: "true" } },
     { name: "Denied approvals", count: state.summary?.denied_approval_events || 0, filters: { action: "approval.denied" } },
     { name: "Blocked policies", count: state.summary?.policy_blocked_events || 0, filters: { action: "policy.blocked" } },
     { name: "Failed tools", count: state.summary?.failed_tool_events || 0, filters: { action: "tool.failed" } },
@@ -2251,17 +2537,17 @@ function detailFilterKey(label) {
   switch (label) {
     case "Action":
       return "action";
-    case "Category":
+    case t("Category"):
       return "category";
-    case "Severity":
+    case t("Severity"):
       return "severity";
-    case "Harness":
+    case t("Harness"):
       return "harness";
-    case "Model":
+    case t("Model"):
       return "model";
-    case "Session":
+    case t("Session"):
       return "session";
-    case "Repository":
+    case t("Repository"):
       return "repository";
     default:
       return "";
@@ -2339,10 +2625,10 @@ function applyPreset(name) {
 
 function applyInsight(kind, value) {
   const key =
-    kind === "Top Actions" ? "action" :
-    kind === "Top Repositories" ? "repository" :
-    kind === "Agent Harnesses" ? "harness" :
-    kind === "Models" ? "model" :
+    kind === t("Top Actions") ? "action" :
+    kind === t("Top Repositories") ? "repository" :
+    kind === t("Agent Harnesses") ? "harness" :
+    kind === t("Models") ? "model" :
     "mcp";
   applyFilters({ [key]: value });
 }
@@ -2351,38 +2637,269 @@ function clearSearch() {
   clearFields();
 }
 
-async function loadTokens() {
+function setupTokenControls() {
   const params = new URLSearchParams(window.location.search);
-  const tokenParams = new URLSearchParams({ bucket: "1h" });
+  const form = $("#token-filter-form");
+  if (!form) return;
+  for (const key of ["range", "harness", "model"]) {
+    if (params.has(key)) form.elements.namedItem(key).value = params.get(key);
+  }
+  if (!params.has("range") && (params.has("since") || params.has("until"))) form.elements.namedItem("range").value = "custom";
+  for (const key of ["since", "until"]) {
+    const date = new Date(params.get(key));
+    if (params.has(key) && Number.isFinite(date.getTime())) {
+      const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+      form.elements.namedItem(key).value = local.toISOString().slice(0, 16);
+    }
+  }
+  const pills = $$("#time-pills [data-range]");
+  const updatePills = () => {
+    const range = form.elements.namedItem("range").value;
+    pills.forEach((pill) => pill.classList.toggle("active", pill.dataset.range === range));
+  };
+  for (const pill of pills) {
+    pill.addEventListener("click", () => {
+      form.elements.namedItem("range").value = pill.dataset.range;
+      updatePills();
+      updateDates();
+      // Users expect the range pills to apply right away; the SWR cache keeps the
+      // reload fast and the refresh button still forces a network pass.
+      if (typeof form.requestSubmit === "function") {
+        form.requestSubmit();
+      } else {
+        form.dispatchEvent(new Event("submit", { cancelable: true }));
+      }
+    });
+  }
+  const updateDates = () => {
+    const custom = form.elements.namedItem("range").value === "custom";
+    for (const key of ["since", "until"]) {
+      const input = form.elements.namedItem(key);
+      input.closest("label").hidden = !custom;
+    }
+  };
+  form.elements.namedItem("range").addEventListener("change", () => {
+    updatePills();
+    updateDates();
+  });
+  updatePills();
+  updateDates();
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const next = new URLSearchParams(window.location.search);
+    for (const key of ["session", "since", "until", "range", "model", "harness"]) next.delete(key);
+    const range = form.elements.namedItem("range").value;
+    for (const key of ["range", "model", "harness"]) {
+      const value = form.elements.namedItem(key).value.trim();
+      if (value) next.set(key, value);
+    }
+    if (range === "custom") {
+      const since = form.elements.namedItem("since").value;
+      const until = form.elements.namedItem("until").value;
+      if (!since || !until || new Date(since) > new Date(until)) {
+        setText("#token-filter-error", t("Choose a valid start and end time"));
+        return;
+      }
+      next.set("since", new Date(since).toISOString());
+      next.set("until", new Date(until).toISOString());
+    }
+    window.location.search = next.toString();
+  });
+  $("#token-reset").addEventListener("click", () => {
+    const next = new URLSearchParams();
+    if (params.has("lang")) next.set("lang", params.get("lang"));
+    if (params.has("view")) next.set("view", params.get("view"));
+    window.location.search = next.toString();
+  });
+  $("#token-refresh").addEventListener("click", () => refreshData(loadTokens).catch(console.error));
+  $("#token-session-search").addEventListener("input", () => window.BeaconAgentView.refresh());
+  $("#token-session-sort").addEventListener("change", () => window.BeaconAgentView.refresh());
+  $("#source-stale-retry").addEventListener("click", () => loadTokens().catch(console.error));
+}
+
+let tokenRequestPending = false;
+let tokenLastReport = null;
+let tokenSessionMetadata = new Map();
+let tokenMetadataCache = null;
+let tokenMetadataCachedAt = 0;
+let tokenAutoRefresh = true;
+
+async function tokenJSON(path) {
+  return getJSON(path, { signal: AbortSignal.timeout(30000) });
+}
+
+
+function setScopeChip(params) {
+  const chip = $("#scope-chip");
+  if (!chip) return;
+  const rangeLabels = { today: t("Today"), "7d": t("Last 7 days"), "30d": t("Last 30 days"), all: t("All time"), custom: t("Custom") };
+  const range = params.get("range");
+  let scope = rangeLabels[range] || t("All time");
+  if (range === "custom" || (!range && (params.get("since") || params.get("until")))) {
+    const since = params.get("since") ? new Date(params.get("since")).toLocaleDateString() : "…";
+    const until = params.get("until") ? new Date(params.get("until")).toLocaleDateString() : "…";
+    scope = `${scope} (${since} ~ ${until})`;
+  }
+  const harness = params.get("harness") ? window.harnessLabel(params.get("harness")) : t("All Agents");
+  const model = params.get("model") || t("All models");
+  chip.textContent = `${t("Current range")}: ${scope} · ${t("Agent")} ${harness} · ${t("Model")} ${model}`;
+}
+
+async function loadTokens() {
+  if (tokenRequestPending) return;
+  tokenRequestPending = true;
+  const params = new URLSearchParams(window.location.search);
+  const tokenParams = buildTokenQuery(params);
   const session = (params.get("session") || "").trim();
-  if (session) tokenParams.set("session", session);
+  const bucketLabel = document.querySelector("#bucket-label");
+  if (bucketLabel) bucketLabel.textContent = tokenParams.get("bucket") === "24h" ? t("Daily buckets") : t("1h buckets");
+  setScopeChip(params);
   try {
     const [status, report] = await Promise.all([
-      getJSON("/api/status"),
-      getJSON(`/api/tokens?${tokenParams.toString()}`),
+      tokenJSON("/api/status"),
+      tokenJSON(`/api/tokens?${tokenParams.toString()}`),
     ]);
     state.status = status;
     state.error = null;
+    if (!report || !report.totals || typeof report.totals !== "object") throw new Error("Invalid token report");
+    tokenLastReport = report;
+    let metadataError = "";
+    try {
+      if (!tokenMetadataCache || Date.now() - tokenMetadataCachedAt > 60000) {
+        const result = await tokenJSON("/api/sessions?limit=5000");
+        if (!Array.isArray(result.sessions)) throw new Error("Invalid session metadata");
+        tokenMetadataCache = result;
+        tokenMetadataCachedAt = Date.now();
+      }
+      tokenSessionMetadata = new Map(tokenMetadataCache.sessions.map(row => [row.id, row]));
+    } catch (error) {
+      metadataError = error.message;
+      tokenSessionMetadata = new Map();
+    }
+    window.BeaconTokenInsights.update(report, status, tokenParams, metadataError ? null : tokenMetadataCache, metadataError);
+    for (const row of report.native?.sessions || []) tokenSessionMetadata.set(row.id, row);
+    window.BeaconAgentView.update(report, status, Array.from(tokenSessionMetadata.values()));
     renderTokensPage(report, session);
+    setText("#token-refresh-status", dataFreshnessText(`${t("Updated")}: `));
+    const coverageParams = new URLSearchParams(tokenParams);
+    for (const key of ["session", "model", "bucket"]) coverageParams.delete(key);
+    try {
+      const coverage = await tokenJSON(`/api/tokens/coverage?${coverageParams}`);
+      renderTokenCoverage(coverage);
+    } catch (err) {
+      setText("#token-coverage", `${t("Coverage unavailable")}: ${err.message}`);
+    }
   } catch (err) {
     state.error = err;
-    setText("#token-meta", `Failed to load token usage: ${err.message}`);
+    window.BeaconTokenInsights.stale();
+    setText("#token-refresh-status", `${t("Refresh failed; previous data may be stale")}: ${err.message}`);
+    setText("#token-meta", `${t("Failed to load token usage")}: ${err.message}`);
+  } finally {
+    tokenRequestPending = false;
   }
 }
 
+function buildTokenQuery(params, now = new Date()) {
+  const query = new URLSearchParams({ bucket: "1h" });
+  for (const key of ["session", "harness", "model", "since", "until"]) {
+    if (params.get(key)) query.set(key, params.get(key));
+  }
+  const range = params.get("range");
+  if (["today", "7d", "30d"].includes(range)) {
+    const since = new Date(now);
+    if (range === "today") since.setHours(0, 0, 0, 0);
+    else since.setTime(now.getTime() - Number.parseInt(range, 10) * 86400000);
+    query.set("since", since.toISOString());
+    query.set("until", now.toISOString());
+    if (range === "30d") query.set("bucket", "24h");
+  }
+  return query;
+}
+
+function renderTokenCoverage(report) {
+  window.BeaconAgentView.coverage(report);
+  window.BeaconTokenInsights.coverage(report);
+  const rows = Array.isArray(report.runtimes) ? report.runtimes : [];
+  const labels = { covered: "Usage received", silent: "Activity without expected usage", inactive: "No activity in range", not_instrumented: "Capture path provides no tokens" };
+  const pillClass = { covered: "ok", silent: "activity", inactive: "muted", not_instrumented: "muted" };
+  const expectations = { reported: "Token usage supported", generic_otlp: "Generic telemetry only", none: "No token capture path" };
+  const limits = {
+    reported: "Usage events need not equal API requests",
+    generic_otlp: "Separate evidence from usage events; no shared token totals",
+    none: "The current path provides no tokens; do not show fake zeros",
+  };
+  const lastSeen = (harness) => {
+    let latest = "";
+    for (const [, meta] of tokenSessionMetadata) {
+      if (meta.harness === harness && Date.parse(meta.last_event_at) > (Date.parse(latest) || 0)) {
+        latest = meta.last_event_at;
+      }
+    }
+    return latest ? new Date(latest).toLocaleString() : t("No observation in range");
+  };
+  const cards = $("#source-status-cards");
+  if (cards) {
+    const count = (statusKey) => rows.filter((row) => row.status === statusKey).length;
+    const warnings = tokenLastReport?.native?.warnings?.length ?? 0;
+    cards.innerHTML = [
+      { kind: "ok", label: t("Usage received"), value: count("covered") },
+      { kind: "idle", label: t("No activity in range"), value: count("inactive") },
+      { kind: "activity", label: t("Activity without expected usage"), value: count("silent") },
+      { kind: "warn", label: t("Read failures"), value: warnings },
+      { kind: "off", label: t("Not connected"), value: rows.filter((row) => row.harness === "grok_bot" || row.status === "not_instrumented").length },
+    ]
+      .map((card) => `<div class="source-status-card ${card.kind}"><span class="ssc-label">${escapeHTML(card.label)}</span><div class="ssc-count">${card.value}<small>${escapeHTML(t("sources"))}</small></div></div>`)
+      .join("");
+  }
+  const banner = $("#source-stale-banner");
+  if (banner) {
+    const warnings = tokenLastReport?.native?.warnings ?? [];
+    if (warnings.length) {
+      banner.hidden = false;
+      setText("#source-stale-text", `${t("Some sources failed to read; the previous successful results are kept")}: ${warnings.join(" · ")}`);
+    } else {
+      banner.hidden = true;
+    }
+  }
+  const note = $("#source-count-note");
+  if (note) {
+    note.textContent = `${rows.length} ${t("sources")} · ${t("local data")}`;
+  }
+  const el = $("#token-coverage");
+  if (!el) return;
+  el.innerHTML =
+    (rows.length
+      ? `<table class="rank-table"><thead><tr><th>${escapeHTML(t("Source"))}</th><th>${escapeHTML(t("Status"))}</th><th>${escapeHTML(t("Record granularity"))}</th><th>${escapeHTML(t("Provided metrics"))}</th><th>${escapeHTML(t("Last successful observation"))}</th><th>${escapeHTML(t("Read warnings and limits"))}</th><th>${escapeHTML(t("Actions"))}</th></tr></thead><tbody>${rows
+          .map((row) => {
+            const contextEvidence = (tokenLastReport?.native?.context_evidence ?? []).find((item) => item.harness === row.harness);
+            const statusClass = ["covered", "silent", "inactive", "not_instrumented"].includes(row.status) ? pillClass[row.status] : "muted";
+            const granularity = contextEvidence ? `<span class="granularity-chip info">${escapeHTML(t("Context occupancy"))}</span>` : row.status === "not_instrumented" ? `<span class="granularity-chip behavior">${escapeHTML(t("Behavior record"))}</span>` : row.status === "covered" ? `<span class="granularity-chip info">${escapeHTML(t("Usage events"))}</span>` : `<span class="muted">—</span>`;
+            const metricsLabel = contextEvidence
+              ? contextEvidence.context_tokens > 0
+                ? t("Sessions, models and context occupancy (billing tokens unknown)")
+                : t("Sessions and models (billing tokens unknown)")
+              : expectations[row.expectation]
+                ? t(expectations[row.expectation])
+                : t("Unknown");
+            const limitLabel = contextEvidence ? t("Billing tokens are accounted by Cursor servers and are not stored locally.") : t(limits[row.expectation] || "Unknown");
+            return `<tr><td><strong>${escapeHTML(harnessLabel(row.harness))}</strong></td><td><span class="state-pill ${statusClass}">${escapeHTML(t(labels[row.status] || "Unknown"))}</span></td><td>${granularity}</td><td>${escapeHTML(metricsLabel)}</td><td>${escapeHTML(lastSeen(row.harness))}</td><td>${escapeHTML(limitLabel)}</td><td><button type="button" class="btn-secondary" data-source-detail="${escapeHTML(row.harness)}">${escapeHTML(t("Details"))}</button></td></tr>`;
+          })
+          .join("")}</tbody></table>`
+      : `<p class="muted section-pad">${escapeHTML(t("No runtime evidence in this range"))}</p>`) +
+    `<p class="method-note">${escapeHTML(t("Coverage uses the time and Agent filters only; it does not prove billing completeness."))} ${escapeHTML(t("Inventory detection is separate from observed activity and may not detect native snapshots."))}</p>`;
+  $$("#token-coverage [data-source-detail]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const params = new URLSearchParams(window.location.search);
+      params.set("harness", button.dataset.sourceDetail);
+      params.set("view", "agents");
+      window.location.search = params.toString();
+    });
+  });
+}
+
 function renderTokensPage(report, session) {
-  setText("#log-path", state.status?.log_path || "Runtime log unavailable");
-  setText("#token-meta", `${report.events_with_usage} of ${report.total_events} events carry usage`);
-  renderTokenCards(report.totals || {}, report.pricing);
-  renderTokenThroughput(report.series || []);
-  renderTokenSplit(report.totals || {});
-  renderTokenBreakdowns(report);
+  setText("#log-path", state.status?.log_path || t("Runtime log unavailable"));
   renderUtilizationRows(report.utilization || []);
-  renderUsageGroupRows("#token-models", report.by_model || [], "model");
-  renderUsageGroupRows("#token-sessions", report.by_session || [], "session");
-  renderUsageGroupRows("#token-users", report.by_user || []);
-  renderUsageGroupRows("#token-runs", report.by_run || []);
-  renderUsageGroupRows("#token-harnesses", report.by_harness || []);
   renderSessionDetail(report.session_detail, session);
 }
 
@@ -2398,11 +2915,11 @@ function usageTotal(usage = {}) {
 // runtime-reported cost rather than in it.
 function estimateHint(totals, pricing) {
   const overrides = pricing?.overrides;
-  const parts = [overrides && !overrides.error ? "list price + overrides" : "list price"];
+  const parts = [t(overrides && !overrides.error ? "list price + overrides" : "list price")];
   const catalog = pricing?.catalog;
-  if (catalog?.generated_at) parts.push(`catalog ${catalog.generated_at}`);
-  if (overrides?.error) parts.push("overrides file invalid, not used");
-  if (totals.unpriced_events) parts.push(`${totals.unpriced_events} unpriced events excluded`);
+  if (catalog?.generated_at) parts.push(t("catalog {date}", { date: catalog.generated_at }));
+  if (overrides?.error) parts.push(t("overrides file invalid, not used"));
+  if (totals.unpriced_events) parts.push(t("{count} unpriced events excluded", { count: totals.unpriced_events }));
   return parts.join(" · ");
 }
 
@@ -2415,19 +2932,19 @@ function renderTokenCards(totals, pricing) {
   if (!$("#token-cards")) return;
   const totalTokens = usageTotal(totals);
   const cards = [
-    { label: "Total Tokens", value: formatTokens(totalTokens), hint: "local captured usage" },
-    { label: "Input Tokens", value: formatTokens((totals.input_tokens || 0) + (totals.cache_read_input_tokens || 0) + (totals.cache_creation_input_tokens || 0)), hint: "fresh + cached" },
-    { label: "Output Tokens", value: formatTokens(totals.output_tokens), hint: "includes reasoning" },
-    { label: "Cached Tokens", value: formatTokens((totals.cache_read_input_tokens || 0) + (totals.cache_creation_input_tokens || 0)) },
-    { label: "Reasoning", value: formatTokens(totals.reasoning_output_tokens) },
-    { label: "Reported cost (USD)", value: totals.cost_usd ? totals.cost_usd.toFixed(4) : "-", hint: "runtime-reported only" },
-    { label: "Est. cost (USD)", value: formatEstimatedCost(totals), hint: estimateHint(totals, pricing) },
+    { label: t("Total Tokens"), value: formatTokens(totalTokens), rawValue: totalTokens, hint: t("local captured usage") },
+    { label: t("Input Tokens"), value: formatTokens((totals.input_tokens || 0) + (totals.cache_read_input_tokens || 0) + (totals.cache_creation_input_tokens || 0)), rawValue: (totals.input_tokens || 0) + (totals.cache_read_input_tokens || 0) + (totals.cache_creation_input_tokens || 0), hint: t("fresh + cached") },
+    { label: t("Output Tokens"), value: formatTokens(totals.output_tokens), rawValue: totals.output_tokens ?? 0, hint: t("includes reasoning") },
+    { label: t("Cached Tokens"), value: formatTokens((totals.cache_read_input_tokens || 0) + (totals.cache_creation_input_tokens || 0)), rawValue: (totals.cache_read_input_tokens || 0) + (totals.cache_creation_input_tokens || 0) },
+    { label: t("Reasoning"), value: formatTokens(totals.reasoning_output_tokens), rawValue: totals.reasoning_output_tokens ?? 0 },
+    { label: t("Reported cost (USD)"), value: totals.cost_usd ? totals.cost_usd.toFixed(4) : "-", hint: t("runtime-reported only") },
+    { label: t("Est. cost (USD)"), value: formatEstimatedCost(totals), hint: estimateHint(totals, pricing) },
   ];
   $("#token-cards").innerHTML = cards
     .map((card) => `
       <div class="card">
         <span class="muted">${escapeHTML(card.label)}</span>
-        <span class="value">${escapeHTML(card.value)}</span>
+        <span class="value"${card.rawValue !== undefined ? ` title="${escapeHTML(formatExactTokens(card.rawValue))}"` : ""}>${escapeHTML(card.value)}</span>
         ${card.hint ? `<span class="muted">${escapeHTML(card.hint)}</span>` : ""}
       </div>
     `)
@@ -2442,9 +2959,9 @@ function renderTokenSplit(totals) {
   const output = totals.output_tokens || 0;
   const reasoning = totals.reasoning_output_tokens || 0;
   const segments = [
-    { name: "Input (fresh)", value: freshInput, color: "#0f7498" },
-    { name: "Cached input", value: cached, color: "#10b981" },
-    { name: "Output", value: output, color: "#7dd3fc" },
+    { name: t("Input (fresh)"), value: freshInput, color: "#0f7498" },
+    { name: t("Cached input"), value: cached, color: "#10b981" },
+    { name: t("Output"), value: output, color: "#7dd3fc" },
   ].filter((segment) => segment.value > 0);
   const total = segments.reduce((sum, segment) => sum + segment.value, 0);
   if (!total) {
@@ -2461,7 +2978,7 @@ function renderTokenSplit(totals) {
     <div class="token-donut" style="background: conic-gradient(${stops})">
       <div>
         <strong>${escapeHTML(formatCompactTokens(total))}</strong>
-        <span>total tokens</span>
+        <span>${escapeHTML(t("total tokens"))}</span>
       </div>
     </div>
     <div class="token-split-legend">
@@ -2473,7 +2990,7 @@ function renderTokenSplit(totals) {
         </div>
       `).join("")}
     </div>
-    ${reasoning > 0 && output > 0 ? `<p class="muted token-reasoning-note">Reasoning: ${escapeHTML(formatTokens(reasoning))} tokens (included in output).</p>` : ""}
+    ${reasoning > 0 && output > 0 ? `<p class="muted token-reasoning-note">${escapeHTML(t("Reasoning: {count} tokens (included in output).", { count: formatTokens(reasoning) }))}</p>` : ""}
   `;
 }
 
@@ -2482,21 +2999,21 @@ function renderTokenBreakdowns(report) {
   if (!el) return;
   const rows = [
     {
-      title: "Tokens by model",
-      breakdownTitle: "Total tokens by model",
+      title: t("Tokens by model"),
+      breakdownTitle: t("Total tokens by model"),
       items: report.by_model || [],
       emptyLabel: "No model token attribution for this range.",
     },
     {
-      title: "Tokens by harness",
-      breakdownTitle: "Total tokens by harness",
+      title: t("Tokens by harness"),
+      breakdownTitle: t("Total tokens by harness"),
       items: report.by_harness || [],
       emptyLabel: "No harness token attribution for this range.",
       labelFormatter: harnessLabel,
     },
     {
-      title: "Tokens by session",
-      breakdownTitle: "Top token sessions",
+      title: t("Tokens by session"),
+      breakdownTitle: t("Top token sessions"),
       items: report.by_session || [],
       emptyLabel: "No session token attribution for this range.",
       labelFormatter: formatSessionID,
@@ -2526,7 +3043,7 @@ function tokenBreakdownRowHTML({ title, breakdownTitle, items, emptyLabel, label
         <div class="panel-title-row">
           <div>
             <h2>${escapeHTML(title)}</h2>
-            <p class="muted">Token usage over the local log, stacked by the top observed values.</p>
+            <p class="muted">${escapeHTML(t("Token usage over the local log, stacked by the top observed values."))}</p>
           </div>
         </div>
         ${visibleItems.length ? `
@@ -2548,7 +3065,7 @@ function tokenBreakdownRowHTML({ title, breakdownTitle, items, emptyLabel, label
         <div class="panel-title-row">
           <div>
             <h2>${escapeHTML(breakdownTitle)}</h2>
-            <p class="muted">Total token counts for the selected range.</p>
+            <p class="muted">${escapeHTML(t("Total token counts for the selected range."))}</p>
           </div>
           <span class="panel-total">${escapeHTML(formatCompactTokens(total))}</span>
         </div>
@@ -2632,13 +3149,13 @@ function renderUsageGroupRows(selector, groups, filterKey) {
   const tbody = $(selector);
   if (!tbody) return;
   if (!groups.length) {
-    tbody.innerHTML = `<tr><td colspan="9" class="muted">No usage captured yet.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="muted">${escapeHTML(t("No usage captured yet."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = groups
     .map((group) => `
       <tr ${filterKey === "session" ? `class="row-link" data-token-session="${escapeHTML(group.key)}"` : ""}>
-        <td class="mono">${escapeHTML(filterKey === "session" ? formatSessionID(group.key) : group.key)}</td>
+        <td class="mono">${escapeHTML(group.key)}${filterKey === "session" && group.metadata ? `<br><small>${escapeHTML(group.metadata.title || "")} · ${escapeHTML(group.metadata.harness || "")} · ${escapeHTML(group.metadata.repository || "")} · ${escapeHTML(group.metadata.last_event_at ? new Date(group.metadata.last_event_at).toLocaleString() : "")}${group.metadata.parent_id ? ` · ${escapeHTML(t("Parent session"))}: ${escapeHTML(group.metadata.parent_id)}` : ""}</small>` : ""}</td>
         ${usageCells(group.usage)}
       </tr>
     `)
@@ -2682,29 +3199,51 @@ function renderSessionDetail(detail, session) {
 }
 
 function usageCells(usage = {}, { events = true } = {}) {
+  const tokenValues = [usage.input_tokens, usage.output_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens, usage.reasoning_output_tokens];
   const cells = [
-    formatTokens(usage.input_tokens),
-    formatTokens(usage.output_tokens),
-    formatTokens(usage.cache_read_input_tokens),
-    formatTokens(usage.cache_creation_input_tokens),
-    formatTokens(usage.reasoning_output_tokens),
+    ...tokenValues.map(formatTokens),
     usage.cost_usd ? usage.cost_usd.toFixed(4) : "-",
     formatEstimatedCost(usage),
   ];
   if (events) cells.push(String(usage.events ?? 0));
-  return cells.map((value) => `<td>${escapeHTML(value)}</td>`).join("");
+  return cells.map((value, index) => `<td${index < tokenValues.length ? ` title="${escapeHTML(formatExactTokens(tokenValues[index]))}"` : ""}>${escapeHTML(value)}</td>`).join("");
 }
 
 function formatTokens(value) {
-  if (!value) return "0";
-  return Number(value).toLocaleString();
+  return formatCompactTokens(value);
 }
 
+// Decimal SI units, at most two fractional digits. Promote after rounding so a
+// value just below a boundary displays as 1M rather than 1000K. Invalid counts
+// are shown as unavailable; raw telemetry and cost formatting are unchanged.
 function formatCompactTokens(value) {
-  const number = Number(value || 0);
-  if (number >= 1000000) return `${(number / 1000000).toFixed(1)}M`;
-  if (number >= 1000) return `${(number / 1000).toFixed(1)}K`;
-  return number.toLocaleString();
+  if (value === undefined || value === null || value === "") {
+    return "0";
+  }
+  const number = typeof value === "number" || typeof value === "string" ? Number(value) : NaN;
+  if (!Number.isFinite(number) || number < 0) {
+    return "-";
+  }
+  const units = ["", "K", "M", "G", "T", "P", "E"];
+  let scaled = number;
+  let unit = 0;
+  while (scaled >= 1000 && unit < units.length - 1) {
+    scaled /= 1000;
+    unit += 1;
+  }
+  let rounded = Number(scaled.toFixed(2));
+  if (rounded >= 1000 && unit < units.length - 1) {
+    rounded = Number((scaled / 1000).toFixed(2));
+    unit += 1;
+  }
+  return `${rounded}${units[unit]}`;
+}
+
+function formatExactTokens(value) {
+  if (formatCompactTokens(value) === "-") {
+    return "-";
+  }
+  return Number(value ?? 0).toLocaleString("en-US", { maximumFractionDigits: 20 });
 }
 
 function formatWholePercent(value) {
@@ -2737,17 +3276,17 @@ async function loadDetections() {
     renderDetections(resp);
   } catch (err) {
     state.error = err;
-    setText("#detections-meta", `Failed to load detections: ${err.message}`);
+    setText("#detections-meta", t("Failed to load detections: {error}", { error: err.message }));
   }
 }
 
 function renderDetections(resp) {
   const rules = resp?.rules || [];
-  setText("#detections-meta", `${rules.length} active rule${rules.length === 1 ? "" : "s"}`);
+  setText("#detections-meta", t("{count} active rules", { count: rules.length }));
   const tbody = $("#detections-rows");
   if (!tbody) return;
   if (!rules.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">No active rules.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No active rules."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = rules
@@ -2781,6 +3320,7 @@ function scrollDetectionHashIntoView({ force = false } = {}) {
   state.lastDetectionHashScroll = targetID;
 }
 
+let findingsLastResponse = null;
 async function loadFindings() {
   const params = new URLSearchParams(window.location.search);
   const minSeverity = (params.get("min_severity") || "").trim();
@@ -2794,27 +3334,37 @@ async function loadFindings() {
   try {
     const resp = await getJSON(`/api/findings${suffix}`);
     state.error = null;
+    findingsLastResponse = resp;
     renderFindings(resp);
   } catch (err) {
     state.error = err;
-    setText("#findings-meta", `Failed to load findings: ${err.message}`);
+    setText("#findings-meta", t("Failed to load findings: {error}", { error: err.message }));
   }
 }
 
 function renderFindings(resp) {
-  const findings = resp?.findings || [];
+  const search = ($("#findings-search")?.value || "").trim().toLocaleLowerCase();
+  const findings = (resp?.findings || []).filter((item) =>
+    [item.rule_id, item.title, item.session_id, item.reason].some((value) => String(value || "").toLocaleLowerCase().includes(search))
+  );
   state.findings = findings;
-  setText("#findings-meta", `${findings.length} finding${findings.length === 1 ? "" : "s"} across ${resp?.scanned || 0} events`);
+  setText("#findings-meta", t("{count} findings across {total} events", { count: findings.length, total: resp?.scanned || 0 }));
+  const sessions = new Set(findings.map((item) => item.session_id).filter(Boolean));
+  const critical = findings.filter((item) => item.severity === "critical").length;
+  const summary = $("#findings-summary");
+  if (summary) {
+    summary.innerHTML = [["Findings in range", findings.length], ["Critical findings", critical], ["Affected sessions", sessions.size]].map(([label, count]) => `<div class="card"><span class="muted">${escapeHTML(t(label))}</span><strong class="value">${escapeHTML(String(count))}</strong></div>`).join("");
+  }
   const tbody = $("#findings-rows");
   if (!tbody) return;
   if (!findings.length) {
     state.findingsExpanded.clear();
-    tbody.innerHTML = `<tr><td colspan="5" class="muted">No findings.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHTML(t(search ? "No matching findings." : "No findings."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = findings
     .map((f, i) => `
-      <tr class="finding-row row-link" data-finding-row="${i}" aria-expanded="false">
+      <tr class="finding-row row-link" data-finding-row="${i}" role="button" tabindex="0" aria-expanded="false">
         <td>${badge(f.severity || "unknown", `severity-${f.severity || "unknown"}`)}</td>
         <td><span class="cell-link mono"><span class="cell-link-caret" aria-hidden="true">&#9656;</span>${escapeHTML(f.rule_id)}</span><br /><span class="muted">${escapeHTML(f.title || "")}</span></td>
         <td><span class="cell-link mono">${escapeHTML(formatSessionID(f.session_id, "-"))}</span></td>
@@ -2825,6 +3375,12 @@ function renderFindings(resp) {
     .join("");
   $$("#findings-rows [data-finding-row]").forEach((row) => {
     row.addEventListener("click", () => toggleFinding(Number(row.dataset.findingRow)));
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleFinding(Number(row.dataset.findingRow));
+      }
+    });
   });
   applyFindingExpansions();
 }
@@ -2889,14 +3445,14 @@ function ruleDetailHTML(ruleId) {
     return `<div class="detail-section"><h3>Detection rule</h3><p class="muted">No active rule found for <span class="mono">${escapeHTML(ruleId)}</span> — it may have been removed from the active set.</p></div>`;
   }
   const rows = [
-    ["Rule", rule.id],
-    ["Title", rule.title],
-    ["Severity", rule.severity],
-    ["Status", rule.status],
-    ["Posture", rule.posture],
-    ["Kind", rule.kind],
-    ["Source", rule.source],
-    ["Reason", rule.reason],
+    [t("Rule"), rule.id],
+    [t("Title"), rule.title],
+    [t("Severity"), rule.severity],
+    [t("Status"), rule.status],
+    [t("Posture"), rule.posture],
+    [t("Kind"), rule.kind],
+    [t("Source"), rule.source],
+    [t("Reason"), rule.reason],
   ].filter(([, value]) => value);
   const taxonomy = rule.taxonomy ? Object.entries(rule.taxonomy) : [];
   return `
@@ -2989,7 +3545,9 @@ const navIcons = {
   "Token Usage": `<svg viewBox="0 0 24 24"><circle cx="8" cy="8" r="6"/><path d="M18.09 10.37A6 6 0 1 1 10.34 18"/><path d="M7 6h1v4"/><path d="m16.71 13.88.7.71-2.82 2.82"/></svg>`,
   "Agent Activity": `<svg viewBox="0 0 24 24"><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></svg>`,
   "Agent Inventory": `<svg viewBox="0 0 24 24"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg>`,
+  "Session Audit": `<svg viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>`,
   "Agent Activity Sessions": `<svg viewBox="0 0 24 24"><path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/></svg>`,
+  "Hook Assets": `<svg viewBox="0 0 24 24"><circle cx="12" cy="5" r="3"/><line x1="12" y1="8" x2="12" y2="21"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/></svg>`,
   "Memory": `<svg viewBox="0 0 24 24"><path d="M15.5 2H8.6c-.4 0-.8.2-.9.5L4.4 9.1a1 1 0 0 0 .9 1.5h13.4a1 1 0 0 0 .9-1.5L16.4 2.5c-.2-.3-.5-.5-.9-.5Z"/><path d="m12 10.6 0 11.4"/><path d="M8 14h8"/><path d="M9 18h6"/></svg>`,
   "Detections": `<svg viewBox="0 0 24 24"><path d="M19.07 4.93A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></svg>`,
 };
@@ -3019,8 +3577,8 @@ function setupNavCollapse() {
   const apply = (collapsed) => {
     document.body.classList.toggle("nav-collapsed", collapsed);
     button.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    button.setAttribute("aria-label", collapsed ? "Expand navigation" : "Collapse navigation");
-    button.setAttribute("title", collapsed ? "Expand navigation" : "Collapse navigation");
+    button.setAttribute("aria-label", collapsed ? t("Expand navigation") : t("Collapse navigation"));
+    button.setAttribute("title", collapsed ? t("Expand navigation") : t("Collapse navigation"));
   };
 
   const initial = localStorage.getItem(navCollapsedStorageKey) === "1";
@@ -3048,7 +3606,7 @@ async function loadMemory() {
 }
 
 function renderMemoryLoading() {
-  setText("#memory-status", "Loading Beacon memory...");
+  setText("#memory-status", t("Loading Beacon memory..."));
 }
 
 function renderMemory() {
@@ -3059,7 +3617,7 @@ function renderMemory() {
   }
   const data = state.memory || {};
   const status = data.status || {};
-  setText("#memory-status", `${status.evaluations || 0} evaluations, ${status.candidates || 0} candidates, ${status.approved_memories || 0} approved memories`);
+  setText("#memory-status", t("{evaluations} evaluations, {candidates} candidates, {memories} approved memories", { evaluations: status.evaluations || 0, candidates: status.candidates || 0, memories: status.approved_memories || 0 }));
   renderMemoryTable("#memory-evaluations", data.evaluations || [], (item) => [
     item.id || "",
     item.trace?.id || "",
@@ -3090,7 +3648,7 @@ function renderMemoryTable(selector, items, rowFn) {
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.className = "muted";
-    cell.textContent = "No records yet.";
+    cell.textContent = t("No records yet.");
     row.append(cell);
     tbody.append(row);
     return;
@@ -3114,6 +3672,10 @@ function formatScore(value) {
 decorateDashboardNav();
 setupNavCollapse();
 
+$("#findings-search")?.addEventListener("input", () => {
+  state.findingsExpanded.clear();
+  if (findingsLastResponse) renderFindings(findingsLastResponse);
+});
 $("#min-severity")?.addEventListener("change", (event) => {
   const params = new URLSearchParams(window.location.search);
   if (event.target.value) params.set("min_severity", event.target.value);
@@ -3247,7 +3809,7 @@ function renderLensTabs() {
     button.append(label);
     return button;
   };
-  tabs.append(tab("", "Full session"));
+  tabs.append(tab("", t("Full session")));
   for (const id of lensHost.added) {
     const lens = lensByID(id);
     const button = tab(id, lens.title);
@@ -3448,31 +4010,157 @@ function mountLens(lens) {
   $("#lens-frame-slot").append(frame);
 }
 
+// Shared shell: clock, language pills and top status come from the page data sources.
+function setupShell() {
+  const clock = $("#shell-clock");
+  if (clock) {
+    const tick = () => {
+      const offset = -new Date().getTimezoneOffset() / 60;
+      clock.textContent = `${new Date().toLocaleTimeString([], { hour12: false })} · UTC${offset >= 0 ? "+" : ""}${offset}`;
+    };
+    tick();
+    setInterval(tick, 1000);
+  }
+  const lang = $("#shell-lang");
+  if (lang) {
+    const current = window.BeaconI18n.language;
+    for (const button of lang.querySelectorAll("button")) {
+      button.classList.toggle("active", button.dataset.lang === current);
+      button.addEventListener("click", () => {
+        if (button.dataset.lang === current) return;
+        window.BeaconI18n.setLanguage(button.dataset.lang);
+      });
+    }
+  }
+  const refresh = $("#shell-refresh");
+  if (refresh) {
+    refresh.addEventListener("click", () => {
+      if (typeof window.__beaconForceRefresh === "function") {
+        window.__beaconForceRefresh();
+      }
+    });
+  }
+  const bucketToggle = document.querySelector("#activity-bucket-toggle");
+  if (bucketToggle) {
+    bucketToggle.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-bucket]");
+      if (!button) return;
+      overviewBucket = button.dataset.bucket;
+      for (const option of bucketToggle.querySelectorAll("button")) {
+        option.classList.toggle("active", option === button);
+      }
+      renderOverviewHourly(state.sessionResult?.sessions ?? []);
+    });
+  }
+  // Findings count badge next to the sidebar entry (design board shows a count).
+  const findingsLink = document.querySelector('.nav-toggle a[href="/findings.html"]');
+  if (findingsLink) {
+    const badge = document.createElement("span");
+    badge.className = "nav-badge";
+    badge.hidden = true;
+    findingsLink.append(badge);
+    getJSON("/api/findings?limit=1", { signal: AbortSignal.timeout(15000) })
+      .then((resp) => {
+        const count = Number(resp?.count ?? 0);
+        window.__beaconFindingsCount = count;
+        if (count > 0) {
+          badge.textContent = String(count);
+          badge.hidden = false;
+        }
+        if (isOverviewPage) renderOverviewAttention(state.summary ?? {});
+      })
+      .catch(console.error);
+  }
+}
+
+async function setupShellStatus() {
+  const pill = $("#shell-status");
+  if (!pill || isTokensPage) return;
+  try {
+    const status = await getJSON("/api/status", { signal: AbortSignal.timeout(15000) });
+    const healthy = status?.collector?.health_ready === true;
+    pill.className = `status-pill ${healthy ? "" : "is-warn"}`;
+    pill.textContent = healthy ? t("Collection normal") : t("Health not confirmed");
+    if (status?.version) setText("#shell-version", String(status.version));
+  } catch (error) {
+    pill.className = "status-pill is-danger";
+    pill.textContent = t("Connection failed");
+  }
+}
+
+setupShell();
+setupShellStatus().catch(console.error);
+
+// The dashboard CSP (default-src 'self') silently drops style attributes present in markup.
+// Legacy renderers emit dynamic sizes and colors that way, so re-apply each blocked attribute
+// through the CSSOM exactly once; childList-only observation keeps this from looping.
+const cspStyleSeen = new WeakSet();
+function reapplyBlockedStyles(root) {
+  if (root.nodeType !== 1) return;
+  const targets = root.hasAttribute?.("style") ? [root, ...root.querySelectorAll("[style]")] : [...root.querySelectorAll("[style]")];
+  for (const element of targets) {
+    if (cspStyleSeen.has(element)) continue;
+    cspStyleSeen.add(element);
+    const css = element.getAttribute("style");
+    if (css) element.style.cssText = css;
+  }
+}
+const cspStyleObserver = new MutationObserver((mutations) => {
+  for (const mutation of mutations) {
+    for (const node of mutation.addedNodes) reapplyBlockedStyles(node);
+  }
+});
+reapplyBlockedStyles(document.body);
+cspStyleObserver.observe(document.body, { childList: true, subtree: true });
+
 if (isDetectionsPage) {
+  window.__beaconForceRefresh = () => refreshData(loadDetections);
   loadDetections().catch(console.error);
-  setInterval(() => loadDetections().catch(console.error), 15000);
+  setInterval(() => { if (!document.hidden) refreshData(loadDetections).catch(console.error); }, 60000);
 } else if (isFindingsPage) {
+  window.__beaconForceRefresh = () => refreshData(loadFindings);
   loadFindings().catch(console.error);
-  setInterval(() => loadFindings().catch(console.error), 15000);
+  setInterval(() => { if (!document.hidden) refreshData(loadFindings).catch(console.error); }, 60000);
 } else if (isTokensPage) {
+  setupTokenControls();
+  window.BeaconAgentView.setup();
+  window.BeaconTokenInsights.setupViews();
+  const pauseButton = document.createElement("button");
+  pauseButton.type = "button";
+  pauseButton.className = "btn-secondary";
+  pauseButton.textContent = t("Pause auto refresh");
+  pauseButton.addEventListener("click", () => {
+    tokenAutoRefresh = !tokenAutoRefresh;
+    pauseButton.textContent = t(tokenAutoRefresh ? "Pause auto refresh" : "Resume auto refresh");
+    pauseButton.setAttribute("aria-pressed", String(!tokenAutoRefresh));
+  });
+  $("#token-refresh").after(pauseButton);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && tokenAutoRefresh) refreshData(loadTokens).catch(console.error);
+  });
+  window.__beaconForceRefresh = () => (tokenAutoRefresh ? refreshData(loadTokens) : loadTokens().catch(console.error));
   loadTokens().catch(console.error);
-  setInterval(() => loadTokens().catch(console.error), 15000);
+  setInterval(() => { if (!document.hidden && tokenAutoRefresh) refreshData(loadTokens).catch(console.error); }, 60000);
 } else if (isSessionDetailPage) {
   initLensTabs().catch(console.error);
+  window.__beaconForceRefresh = () => refreshData(loadSessionPage);
   loadSessionPage().catch(console.error);
-  setInterval(() => loadSessionPage().catch(console.error), 15000);
+  setInterval(() => { if (!document.hidden) refreshData(loadSessionPage).catch(console.error); }, 60000);
 } else if (isInventoryPage) {
   hydrateInventoryStateFromURL();
+  window.__beaconForceRefresh = () => refreshData(loadInventory);
   loadInventory().catch(console.error);
-  setInterval(() => loadInventory().catch(console.error), 15000);
+  setInterval(() => { if (!document.hidden) refreshData(loadInventory).catch(console.error); }, 60000);
 } else if (isMemoryPage) {
+  window.__beaconForceRefresh = () => refreshData(loadMemory);
   loadMemory().catch(console.error);
-  setInterval(() => loadMemory().catch(console.error), 15000);
+  setInterval(() => { if (!document.hidden) refreshData(loadMemory).catch(console.error); }, 60000);
 } else {
   hydrateFiltersFromURL();
   setupSessionFilters();
+  window.__beaconForceRefresh = () => refreshData(() => load({ mode: "poll" }));
   load().catch(console.error);
-  setInterval(() => load({ mode: "poll" }).catch(console.error), 10000);
+  setInterval(() => { if (!document.hidden) refreshData(() => load({ mode: "poll" })).catch(console.error); }, 60000);
 }
 
 function setText(selector, value) {

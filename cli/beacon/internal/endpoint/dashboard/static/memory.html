@@ -3,65 +3,91 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Beacon | Self‑improving memory for coding agents</title>
+    <title data-i18n="Beacon | Self‑improving memory for coding agents">Beacon | Self‑improving memory for coding agents</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/i18n.css" />
+    <script>
+      try {
+        var __lang = new URLSearchParams(location.search).get("lang");
+        if (!__lang) {
+          try { __lang = localStorage.getItem("beacon.dashboard.language"); } catch (e) {}
+        }
+        if (__lang === "zh-CN") {
+          document.documentElement.classList.add("i18n-pending");
+        }
+      } catch (e) {}
+      setTimeout(function () {
+        document.documentElement.classList.remove("i18n-pending");
+      }, 3000);
+    </script>
+    <style>html.i18n-pending body { visibility: hidden; }</style>
   </head>
   <body data-page="memory">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Local-only</p>
-        <h1>Beacon Memory</h1>
+        <div class="page-head">
+          <h1 data-i18n="Memory">Memory</h1>
+          <p class="page-subtitle" data-i18n="Learning store, evaluations, candidates and approved records across Agents">Learning store, evaluations, candidates and approved records across Agents</p>
+        </div>
       </div>
-      <nav class="nav-toggle" aria-label="Dashboard navigation">
-        <div class="nav-section">
-          <div class="nav-section-title">Overview</div>
-          <a href="/findings.html">Findings</a>
+      <div class="topbar-actions">
+        <span class="status-pill" id="shell-status" role="status"></span>
+        <span class="shell-clock" id="shell-clock"></span>
+        <div class="lang-toggle" id="shell-lang">
+          <button type="button" data-lang="zh-CN">中</button>
+          <button type="button" data-lang="en">EN</button>
         </div>
-        <div class="nav-section">
-          <div class="nav-parent">Analytics</div>
-          <a href="/tokens.html">Token Usage</a>
-          <a href="/overview.html">Agent Activity</a>
-          <a class="active" aria-current="page" href="/memory.html">Memory</a>
-        </div>
-        <div class="nav-section">
-          <div class="nav-section-title">Observe</div>
-          <a href="/inventory.html">Agent Inventory</a>
-          <a href="/">Agent Activity Sessions</a>
-        </div>
-        <div class="nav-section">
-          <div class="nav-section-title">Control</div>
-          <a href="/detections.html">Detections</a>
-        </div>
-      </nav>
+        <button type="button" class="btn-secondary" id="shell-refresh" data-i18n="Refresh">Refresh</button>
+      </div>
+    <nav class="nav-toggle" aria-label="Dashboard navigation" data-i18n-aria-label="Dashboard navigation">
+      <a class="nav-brand" href="/"><svg class="nav-logo" aria-hidden="true" viewBox="0 0 48 48"><rect width="48" height="48" rx="11" fill="#2f6f62"/><g fill="#ffffff"><path d="M24 8c5.6 5.6 5.6 11.8 0 15.4-5.6-3.6-5.6-9.8 0-15.4z"/><path d="M40 24c-5.6 5.6-11.8 5.6-15.4 0 3.6-5.6 9.8-5.6 15.4 0z"/><path d="M24 40c-5.6-5.6-5.6-11.8 0-15.4 5.6 3.6 5.6 9.8 0 15.4z"/><path d="M8 24c5.6-5.6 11.8-5.6 15.4 0-3.6 5.6-9.8 5.6-15.4 0z"/><circle cx="24" cy="24" r="3"/></g></svg><span class="nav-brand-text"><strong>Beacon</strong><span data-i18n="Local agent audit">Agent audit</span></span></a>
+      <a href="/overview.html" data-i18n="Agent Activity">Agent Activity</a>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 16v-5"/><path d="M12 16V8"/><path d="M17 16v-8"/></svg><span data-i18n="Analytics">Analytics</span></div>
+      <a href="/tokens.html" data-i18n="Token Usage">Token Usage</a>
+      </div>
+      <div class="nav-group">
+      <a href="/" data-i18n="Session Audit">Session Audit</a>
+      </div>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg><span data-i18n="Observe">Observe</span></div>
+      <a href="/findings.html" data-i18n="Findings">Findings</a>
+      <a href="/detections.html" data-i18n="Detections">Detections</a>
+      </div>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg><span data-i18n="Assets and memory">Assets and memory</span></div>
+      <a href="/inventory.html" data-i18n="Agent Inventory">Agent Inventory</a>
+      <a href="/inventory-hooks.html" data-i18n="Hook Assets">Hook Assets</a>
+      <a href="/memory.html" class="active" aria-current="page" data-i18n="Memory">Memory</a>
+      </div>
+<div class="local-mode-card">
+        <strong><span class="local-dot"></span><span data-i18n="Local mode">Local mode</span></strong>
+        <span data-i18n="Data stays on this machine; no cloud account.">Data stays on this machine; no cloud account.</span>
+        <div class="local-version" id="shell-version"></div>
+      </div>
+    </nav>
     </header>
 
     <main>
-      <section class="dashboard-hero">
-        <div>
-          <h2>Cross-Harness Memory</h2>
-          <p class="muted">Read-only view of local evaluations, review candidates, and approved project memories. Mutations stay in the CLI.</p>
-        </div>
-      </section>
-
       <section class="panel status-panel">
         <div>
-          <h2>Learning Store</h2>
-          <p id="memory-status" class="muted">Loading Beacon memory...</p>
+          <h2 data-i18n="Learning Store">Learning Store</h2>
+          <p id="memory-status" class="muted" data-i18n="Loading Beacon memory...">Loading Beacon memory...</p>
         </div>
       </section>
 
       <section class="panel">
-        <h2>Evaluations</h2>
+        <h2 data-i18n="Evaluations">Evaluations</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Evaluation</th>
-                <th>Trace</th>
-                <th>Status</th>
-                <th>Score</th>
-                <th>Title</th>
+                <th data-i18n="Evaluation">Evaluation</th>
+                <th data-i18n="Trace">Trace</th>
+                <th data-i18n="Status">Status</th>
+                <th data-i18n="Score">Score</th>
+                <th data-i18n="Title">Title</th>
               </tr>
             </thead>
             <tbody id="memory-evaluations"></tbody>
@@ -70,15 +96,15 @@
       </section>
 
       <section class="panel">
-        <h2>Candidates</h2>
+        <h2 data-i18n="Candidates">Candidates</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Candidate</th>
-                <th>State</th>
-                <th>Kind</th>
-                <th>Title</th>
+                <th data-i18n="Candidate">Candidate</th>
+                <th data-i18n="State">State</th>
+                <th data-i18n="Kind">Kind</th>
+                <th data-i18n="Title">Title</th>
               </tr>
             </thead>
             <tbody id="memory-candidates"></tbody>
@@ -87,15 +113,15 @@
       </section>
 
       <section class="panel">
-        <h2>Approved Memory</h2>
+        <h2 data-i18n="Approved Memory">Approved Memory</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Memory</th>
-                <th>Kind</th>
-                <th>Title</th>
-                <th>Applicability</th>
+                <th data-i18n="Memory">Memory</th>
+                <th data-i18n="Kind">Kind</th>
+                <th data-i18n="Title">Title</th>
+                <th data-i18n="Applicability">Applicability</th>
               </tr>
             </thead>
             <tbody id="memory-approved"></tbody>
@@ -104,6 +130,7 @@
       </section>
     </main>
 
+    <script src="/i18n.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

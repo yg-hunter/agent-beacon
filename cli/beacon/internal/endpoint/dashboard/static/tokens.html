@@ -3,169 +3,354 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Beacon | Self‑improving memory for coding agents</title>
+    <title data-i18n="Beacon | Token usage">Beacon | Token usage</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/i18n.css" />
+    <script>
+      try {
+        var __lang = new URLSearchParams(location.search).get("lang");
+        if (!__lang) {
+          try { __lang = localStorage.getItem("beacon.dashboard.language"); } catch (e) {}
+        }
+        if (__lang === "zh-CN") {
+          document.documentElement.classList.add("i18n-pending");
+        }
+      } catch (e) {}
+      setTimeout(function () {
+        document.documentElement.classList.remove("i18n-pending");
+      }, 3000);
+    </script>
+    <style>html.i18n-pending body { visibility: hidden; }</style>
   </head>
   <body data-page="tokens">
+    <nav class="nav-toggle" aria-label="Dashboard navigation" data-i18n-aria-label="Dashboard navigation">
+      <a class="nav-brand" href="/"><svg class="nav-logo" aria-hidden="true" viewBox="0 0 48 48"><rect width="48" height="48" rx="11" fill="#2f6f62"/><g fill="#ffffff"><path d="M24 8c5.6 5.6 5.6 11.8 0 15.4-5.6-3.6-5.6-9.8 0-15.4z"/><path d="M40 24c-5.6 5.6-11.8 5.6-15.4 0 3.6-5.6 9.8-5.6 15.4 0z"/><path d="M24 40c-5.6-5.6-5.6-11.8 0-15.4 5.6 3.6 5.6 9.8 0 15.4z"/><path d="M8 24c5.6-5.6 11.8-5.6 15.4 0-3.6 5.6-9.8 5.6-15.4 0z"/><circle cx="24" cy="24" r="3"/></g></svg><span class="nav-brand-text"><strong>Beacon</strong><span data-i18n="Local agent audit">Agent audit</span></span></a>
+      <a href="/overview.html" data-i18n="Agent Activity">Agent Activity</a>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 16v-5"/><path d="M12 16V8"/><path d="M17 16v-8"/></svg><span data-i18n="Analytics">Analytics</span></div>
+      <a href="/tokens.html" class="active" aria-current="page" data-i18n="Token Usage">Token Usage</a>
+      </div>
+      <div class="nav-group">
+      <a href="/" data-i18n="Session Audit">Session Audit</a>
+      </div>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg><span data-i18n="Observe">Observe</span></div>
+      <a href="/findings.html" data-i18n="Findings">Findings</a>
+      <a href="/detections.html" data-i18n="Detections">Detections</a>
+      </div>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg><span data-i18n="Assets and memory">Assets and memory</span></div>
+      <a href="/inventory.html" data-i18n="Agent Inventory">Agent Inventory</a>
+      <a href="/inventory-hooks.html" data-i18n="Hook Assets">Hook Assets</a>
+      <a href="/memory.html" data-i18n="Memory">Memory</a>
+      </div>
+<div class="local-mode-card">
+        <strong><span class="local-dot"></span><span data-i18n="Local mode">Local mode</span></strong>
+        <span data-i18n="Data stays on this machine; no cloud account.">Data stays on this machine; no cloud account.</span>
+        <div class="local-version" id="shell-version"></div>
+      </div>
+    </nav>
     <header class="topbar">
       <div>
-        <p class="eyebrow">Local-only</p>
-        <h1>Token Usage</h1>
+        <div class="page-head">
+          <h1 data-i18n="Token Usage">Token Usage</h1>
+          <p class="page-subtitle" data-i18n="Track captured usage by Agent, model and project · local data">Track captured usage by Agent, model and project · local data</p>
+        </div>
       </div>
-      <nav class="nav-toggle" aria-label="Dashboard navigation">
-        <div class="nav-section">
-          <div class="nav-section-title">Overview</div>
-          <a href="/findings.html">Findings</a>
+      <div class="topbar-actions">
+        <span class="status-pill" id="shell-status" role="status"></span>
+        <span class="shell-clock" id="shell-clock"></span>
+        <div class="lang-toggle" id="shell-lang">
+          <button type="button" data-lang="zh-CN">中</button>
+          <button type="button" data-lang="en">EN</button>
         </div>
-        <div class="nav-section">
-          <div class="nav-parent">Analytics</div>
-          <a class="active" aria-current="page" href="/tokens.html">Token Usage</a>
-          <a href="/overview.html">Agent Activity</a>
-          <a href="/memory.html">Memory</a>
-        </div>
-        <div class="nav-section">
-          <div class="nav-section-title">Observe</div>
-          <a href="/inventory.html">Agent Inventory</a>
-          <a href="/">Agent Activity Sessions</a>
-        </div>
-        <div class="nav-section">
-          <div class="nav-section-title">Control</div>
-          <a href="/detections.html">Detections</a>
-        </div>
-      </nav>
+        <button type="button" class="btn-secondary" id="shell-refresh" data-i18n="Refresh">Refresh</button>
+        <button type="button" class="btn-secondary" id="shell-export" data-i18n="Export">Export</button>
+      </div>
     </header>
 
     <main>
-      <section class="dashboard-hero analytics-hero">
-        <div>
-          <h2>Token usage analytics</h2>
-          <p class="muted">Token consumption, runtime-reported and list-price estimated cost, cache usage, and context-window pressure across local AI agents.</p>
-        </div>
-        <div class="range-pills" aria-label="Local token analytics range">
-          <span class="active">Local log</span>
-          <span>1h buckets</span>
-        </div>
-      </section>
-
-      <section class="panel status-panel">
-        <div>
-          <h2>Endpoint</h2>
-          <p id="log-path" class="muted">Loading runtime log...</p>
-        </div>
-      </section>
-
-      <section>
-        <div class="section-head overview-head">
-          <div>
-            <h2>Token Totals</h2>
-            <p class="muted">Prompt, completion, cache, reasoning, runtime-reported cost and a list-price estimate across all captured telemetry.</p>
+      <section class="filter-shell" id="token-filter-section">
+        <form id="token-filter-form">
+          <input type="hidden" name="range" value="all">
+          <span class="filter-label" data-i18n="Time">Time</span>
+          <span class="time-pills" id="time-pills">
+            <button type="button" data-range="today" data-i18n="Today">Today</button>
+            <button type="button" data-range="7d" data-i18n="Last 7 days">Last 7 days</button>
+            <button type="button" data-range="30d" data-i18n="Last 30 days">Last 30 days</button>
+            <button type="button" data-range="all" data-i18n="All time">All time</button>
+            <button type="button" data-range="custom" data-i18n="Custom">Custom</button>
+          </span>
+          <label><span data-i18n="Agent">Agent</span>
+            <select name="harness"><option value="" data-i18n="All Agents">All Agents</option></select>
+          </label>
+          <label><span data-i18n="Model">Model</span>
+            <input name="model" type="search" data-i18n-placeholder="Model substring">
+          </label>
+          <label hidden><span data-i18n="From">From</span> <input name="since" type="datetime-local"></label>
+          <label hidden><span data-i18n="Until">Until</span> <input name="until" type="datetime-local"></label>
+          <button class="btn-secondary" type="button" id="token-reset" data-i18n="Reset">Reset</button>
+          <button class="btn-primary" type="submit" id="token-refresh" data-i18n="Refresh now">Refresh now</button>
+          <span id="bucket-label" hidden></span>
+          <div class="filter-meta-row">
+            <span class="scope-chip" id="scope-chip"></span>
+            <span class="scope-note" data-i18n="Local timezone · reasoning is an output subset and is not added again">Local timezone · reasoning is an output subset and is not added again</span>
           </div>
-          <div id="token-meta" class="muted"></div>
-        </div>
-        <div class="cards" id="token-cards"></div>
+          <p class="filter-feedback" id="token-refresh-status" role="status" aria-live="polite"></p>
+          <p class="filter-feedback" id="token-filter-error" role="alert"></p>
+        </form>
       </section>
 
-      <section class="analytics-grid token-analytics-grid">
-        <div class="analytics-panel">
-          <div class="panel-title-row">
-            <div>
-              <h2>Token throughput</h2>
-              <p class="muted">Hourly local usage trend from the runtime log. Bars include input, cache, output, and reasoning tokens when captured.</p>
+      <div class="view-tabs" id="token-view-tabs" role="tablist" data-i18n-aria-label="Token views">
+        <button type="button" id="token-view-tab-overview" role="tab" aria-controls="token-view-overview" aria-selected="true" data-i18n="Summary">Summary</button>
+        <button type="button" id="token-view-tab-agents" role="tab" aria-controls="token-view-agents" aria-selected="false" data-i18n="Agent comparison">Agent comparison</button>
+        <button type="button" id="token-view-tab-details" role="tab" aria-controls="token-view-details" aria-selected="false" data-i18n="Detailed analysis">Detailed analysis</button>
+        <button type="button" id="token-view-tab-sources" role="tab" aria-controls="token-view-sources" aria-selected="false" data-i18n="Collection management">Collection management</button>
+        <span class="view-tabs-note" data-i18n="Usage events are not the same as API requests">Usage events are not the same as API requests</span>
+      </div>
+
+      <!-- ============ Overview tab ============ -->
+      <div id="token-view-overview" role="tabpanel" aria-labelledby="token-view-tab-overview" class="tab-panel">
+        <div class="kpi-row" id="token-kpis"></div>
+        <section class="chart-panel">
+          <div class="chart-head">
+            <h2 data-i18n="Token trend">Token trend</h2>
+            <span class="chart-toggle" id="trend-toggle">
+              <button type="button" data-mode="component" class="active" data-i18n="By component">By component</button>
+              <button type="button" data-mode="agent" data-i18n="By Agent">By Agent</button>
+            </span>
+            <span class="chart-toggle" id="trend-scale">
+              <button type="button" data-scale="absolute" class="active" data-i18n="Absolute">Absolute</button>
+              <button type="button" data-scale="share" data-i18n="Share">Share</button>
+            </span>
+            <label class="check-inline" id="trend-exclude-wrap"><input type="checkbox" id="trend-exclude-read"><span data-i18n="Exclude cache read">Exclude cache read</span></label>
+          </div>
+          <div class="chart-legend" id="token-trend-legend"></div>
+          <div class="trend-chart" id="token-trend"></div>
+          <p class="chart-footnote" id="trend-view-note" hidden></p>
+          <p class="chart-footnote" data-i18n="Total = fresh input + cache read + cache write + output; reasoning is included in output.">Total = fresh input + cache read + cache write + output; reasoning is included in output.</p>
+        </section>
+        <section class="panel">
+          <div class="chart-head section-pad">
+            <h2 data-i18n="Agent ranking">Agent ranking</h2>
+            <span class="scope-note" id="token-rank-scope"></span>
+            <button type="button" class="btn-secondary" id="token-rank-more" data-i18n="Full comparison">Full comparison</button>
+          </div>
+          <div class="table-scroll section-pad" id="token-rank"></div>
+        </section>
+        <div class="summary-cards">
+          <section class="chart-panel">
+            <div class="chart-head">
+              <h2 data-i18n="Model composition">Model composition</h2>
+              <span class="state-pill warn" id="token-model-gap" hidden></span>
             </div>
-          </div>
-          <div class="chart-legend">
-            <span><i class="legend-input"></i>Input</span>
-            <span><i class="legend-output"></i>Output</span>
-          </div>
-          <div class="throughput-bars" id="token-throughput"></div>
-        </div>
-        <div class="analytics-panel">
-          <div class="panel-title-row">
-            <div>
-              <h2>Token split</h2>
-              <p class="muted">Fresh input, cached input, output, and reasoning share for the selected local log.</p>
+            <div class="donut-wrap section-pad" id="token-models-donut"></div>
+          </section>
+          <section class="chart-panel">
+            <div class="chart-head">
+              <h2 data-i18n="Model usage">Model usage</h2>
+              <span class="scope-note" data-i18n="Top models by captured tokens">Top models by captured tokens</span>
             </div>
-          </div>
-          <div id="token-split" class="token-split"></div>
+            <div class="model-bars section-pad" id="token-model-bars"></div>
+          </section>
+          <section class="chart-panel">
+            <div class="chart-head">
+              <h2 data-i18n="Project composition">Project composition</h2>
+              <span class="chart-toggle" id="project-toggle">
+                <button type="button" data-key="tokens" class="active" data-i18n="Tokens">Tokens</button>
+                <button type="button" data-key="sessions" data-i18n="Sessions">Sessions</button>
+              </span>
+            </div>
+            <div class="project-bars section-pad" id="token-projects"></div>
+          </section>
         </div>
-      </section>
+        <div class="method-note">
+          <span data-i18n="Method notes">Method notes</span>
+          <span data-i18n="Captured usage is not a bill; source outages and non-instrumented sources are excluded; unknown cost stays unknown.">Captured usage is not a bill; source outages and non-instrumented sources are excluded; unknown cost stays unknown.</span>
+          <details>
+            <summary data-i18n="Full method and source layout">Full method and source layout</summary>
+            <div id="token-method-details" class="section-pad"></div>
+          </details>
+        </div>
+      </div>
 
-      <section id="token-breakdowns" class="analytics-stack"></section>
+      <!-- ============ Agent comparison tab ============ -->
+      <div id="token-view-agents" role="tabpanel" aria-labelledby="token-view-tab-agents" class="tab-panel" hidden>
+        <section class="panel">
+          <div class="table-toolbar">
+            <input type="search" id="agent-search" data-i18n-placeholder="Search Agents" placeholder="Search Agents">
+            <label class="filter-label"><span data-i18n="Sort by">Sort by</span>
+              <select id="agent-sort">
+                <option value="total" data-i18n="Captured tokens, descending">Captured tokens, descending</option>
+                <option value="input_tokens" data-i18n="Input (fresh)">Input (fresh)</option>
+                <option value="output_tokens" data-i18n="Output">Output</option>
+                <option value="cache_read_input_tokens" data-i18n="Cache Read">Cache Read</option>
+                <option value="name" data-i18n="Agent name">Agent name</option>
+              </select>
+            </label>
+            <label class="check-inline"><input type="checkbox" id="agent-covered-only"><span data-i18n="Only sources with captured usage">Only sources with captured usage</span></label>
+            <span class="toolbar-count" id="agent-count"></span>
+            <button type="button" class="btn-secondary" id="agent-export-csv">CSV</button>
+            <button type="button" class="btn-secondary" id="agent-export-json">JSON</button>
+          </div>
+          <div class="table-scroll" id="agent-consumption-cards"></div>
+          <p class="method-note" id="agent-footnote"></p>
+        </section>
+        <div class="summary-cards" id="agent-summaries"></div>
+      </div>
 
-      <section class="panel">
-        <h2>Context Window Utilization</h2>
-        <p class="muted">Input plus cache tokens per call against each model's context window. Unknown models show raw input tokens.</p>
-        <table>
-          <thead>
-            <tr><th>Model</th><th>Window</th><th>Calls</th><th>Max Input</th><th>Max</th><th>P95</th><th>Near Limit</th></tr>
-          </thead>
-          <tbody id="token-utilization"></tbody>
-        </table>
-      </section>
+      <!-- ============ Detailed analysis tab ============ -->
+      <div id="token-view-details" role="tabpanel" aria-labelledby="token-view-tab-details" class="tab-panel" hidden>
+        <section class="panel">
+          <div class="table-toolbar">
+            <span class="subtabs" id="dimension-tabs" role="tablist">
+              <button type="button" data-dimension="by_model" class="active" data-i18n="Model">Model</button>
+              <button type="button" data-dimension="by_repository" data-i18n="Project">Project</button>
+              <button type="button" data-dimension="by_session" data-i18n="Session">Session</button>
+              <button type="button" data-dimension="by_harness" data-i18n="Agent">Agent</button>
+              <button type="button" data-dimension="native" data-i18n="Native dimensions">Native dimensions</button>
+            </span>
+            <label class="check-inline"><input type="checkbox" id="dimension-exact"><span data-i18n="Show exact values">Show exact values</span></label>
+            <span class="toolbar-count" id="dimension-count"></span>
+          </div>
+          <div class="table-toolbar" id="native-dimension-bar" hidden>
+            <label class="filter-label"><span data-i18n="Native dimension">Native dimension</span>
+              <select id="agent-dimension"></select>
+            </label>
+            <span class="scope-note" id="agent-dimension-note"></span>
+          </div>
+          <div class="table-toolbar" id="session-tools" hidden>
+            <input type="search" id="token-session-search" data-i18n-placeholder="Session ID, project or Agent" placeholder="Session ID, project or Agent">
+            <label class="filter-label"><span data-i18n="Sort by">Sort by</span>
+              <select id="token-session-sort">
+                <option value="tokens" data-i18n="Total Tokens">Total Tokens</option>
+                <option value="cost" data-i18n="Est. USD">Est. USD</option>
+                <option value="events" data-i18n="Events">Events</option>
+                <option value="time" data-i18n="Latest activity">Latest activity</option>
+                <option value="session" data-i18n="Session ID">Session ID</option>
+              </select>
+            </label>
+            <span class="toolbar-count" id="token-session-count"></span>
+          </div>
+          <div class="table-scroll" id="agent-dimension-table"></div>
+        </section>
+        <section class="panel" id="token-utilization-panel">
+          <div class="section-pad">
+            <h2 data-i18n="Context Window Utilization">Context Window Utilization</h2>
+            <p class="muted" data-i18n="Input plus cache tokens per call against each model's context window. Unknown models show raw input tokens.">Input plus cache tokens per call against each model's context window. Unknown models show raw input tokens.</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th data-i18n="Model">Model</th><th data-i18n="Window">Window</th><th data-i18n="Calls">Calls</th><th data-i18n="Max Input">Max Input</th><th data-i18n="Max">Max</th><th>P95</th><th data-i18n="Near Limit">Near Limit</th></tr>
+              </thead>
+              <tbody id="token-utilization"></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel" id="token-session-panel" hidden>
+          <div class="section-pad">
+            <h2 id="token-session-title">Session Detail</h2>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr><th>Step</th><th data-i18n="Model">Model</th><th data-i18n="Input">Input</th><th data-i18n="Output">Output</th><th data-i18n="Cache Read">Cache Read</th><th data-i18n="Cache Create">Cache Create</th><th data-i18n="Reasoning">Reasoning</th><th data-i18n="Reported USD">Reported USD</th><th data-i18n="Est. USD">Est. USD</th></tr>
+              </thead>
+              <tbody id="token-session-detail"></tbody>
+            </table>
+          </div>
+        </section>
+        <div class="granularity-legend" id="granularity-legend"></div>
+      </div>
 
-      <section class="panel">
-        <h2>By Model</h2>
-        <table>
-          <thead>
-            <tr><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th><th>Reasoning</th><th title="What the runtime reported">Reported USD</th><th title="List-price estimate from the embedded catalog">Est. USD</th><th>Events</th></tr>
-          </thead>
-          <tbody id="token-models"></tbody>
-        </table>
-      </section>
+      <!-- ============ Collection management tab ============ -->
+      <div id="token-view-sources" role="tabpanel" aria-labelledby="token-view-tab-sources" class="tab-panel" hidden>
+        <div class="source-status-row" id="source-status-cards"></div>
+        <div class="stale-banner" id="source-stale-banner" hidden>
+          <span id="source-stale-text"></span>
+          <button type="button" id="source-stale-retry" data-i18n="Retry refresh">Retry refresh</button>
+        </div>
+        <section class="panel">
+          <div class="table-toolbar">
+            <h2 data-i18n="Sources and provided metrics">Sources and provided metrics</h2>
+            <span class="scope-note" id="source-count-note"></span>
+          </div>
+          <div class="table-scroll" id="token-coverage"></div>
+        </section>
+        <div class="import-grid">
+          <section class="import-card">
+            <h3><span class="local-dot"></span><span data-i18n="Grok Bot usage snapshot import">Grok Bot usage snapshot import</span></h3>
+            <div class="import-dropzone" id="grok-dropzone">
+              <strong data-i18n="No snapshot imported yet">No snapshot imported yet</strong>
+              <span data-i18n="Grok Bot has no live capture path; import a verified JSON snapshot to include its usage in statistics.">Grok Bot has no live capture path; import a verified JSON snapshot to include its usage in statistics.</span>
+              <span class="dropzone-actions">
+                <label class="btn-primary import-file-label"><span data-i18n="Import usage snapshot">Import usage snapshot</span><input id="grok-usage-file" type="file" accept="application/json,.json" class="import-file-input"></label>                <button type="button" class="btn-secondary" id="grok-format-sample" data-i18n="View format example">View format example</button>
+              </span>
+            </div>
+            <div class="import-file-row" id="grok-file-row" hidden>
+              <span id="grok-file-name"></span>
+              <span class="file-meta" id="grok-file-meta"></span>
+              <span class="import-ok" id="grok-file-state"></span>
+              <button type="button" class="btn-secondary" id="grok-rechoose" data-i18n="Choose again">Choose again</button>
+            </div>
+            <div id="grok-counts" hidden>
+              <p class="muted import-counts-title" data-i18n="Four token counts (must be explicit)">Four token counts (must be explicit)</p>
+              <div class="import-counts" id="grok-count-cards"></div>
+              <p class="muted import-counts-note" data-i18n="Reasoning is an output subset; do not add it separately. A missing count rejects the whole import.">Reasoning is an output subset; do not add it separately. A missing count rejects the whole import.</p>
+            </div>
+            <div class="import-rules">
+              <h4 data-i18n="Import validation rules">Import validation rules</h4>
+              <ul>
+                <li data-i18n="File size and row limits; version field must be version 1">File size and row limits; version field must be version 1</li>
+                <li data-i18n="Record IDs are unique; no duplicates">Record IDs are unique; no duplicates</li>
+                <li data-i18n="Four token counts are explicit non-negative integers">Four token counts are explicit non-negative integers</li>
+                <li data-i18n="Status field must use the allowed enum">Status field must use the allowed enum</li>
+              </ul>
+            </div>
+            <p class="import-warn-note" data-i18n="A successful import replaces the previous snapshot as a whole (there is no history). The import only provides statistics; it does not add command or file audit records and does not enable live collection.">A successful import replaces the previous snapshot as a whole (there is no history). The import only provides statistics; it does not add command or file audit records and does not enable live collection.</p>
+            <p id="grok-usage-preview" class="import-feedback" role="status"></p>
+            <p id="grok-import-result" class="import-feedback" role="status"></p>
+            <div class="import-actions">
+              <button type="button" class="btn-secondary" id="grok-cancel" data-i18n="Cancel">Cancel</button>
+              <button type="button" class="btn-primary" id="grok-usage-import" disabled data-i18n="Import and replace snapshot">Import and replace snapshot</button>
+            </div>
+            <p class="import-footnote"><span data-i18n="Files are parsed locally and never uploaded.">Files are parsed locally and never uploaded.</span></p>
+          </section>
+          <section class="import-card import-state-card">
+            <h3><span class="local-dot"></span><span data-i18n="Import status">Import status</span></h3>
+            <p class="import-state-empty" id="import-state-line" data-i18n="No import record on this page yet">No import record on this page yet</p>
+            <p data-i18n="The snapshot replaces as a whole and is not added to history; importing does not change other sources' collection status.">The snapshot replaces as a whole and is not added to history; importing does not change other sources' collection status.</p>
+          </section>
+        </div>
+        <div class="method-note">
+          <span data-i18n="Local usage refreshes read at least 15 seconds apart; usage snapshots are for statistics only and do not represent new commands or file events; clearing local history shrinks the displayed range.">Local usage refreshes read at least 15 seconds apart; usage snapshots are for statistics only and do not represent new commands or file events; clearing local history shrinks the displayed range.</span>
+          <span data-i18n="Enabled, no data in range, activity only, read failure and not connected are five different states; an old snapshot never proves being online.">Enabled, no data in range, activity only, read failure and not connected are five different states; an old snapshot never proves being online.</span>
+        </div>
+      </div>
 
-      <section class="panel">
-        <h2>By Session</h2>
-        <p class="muted">Select a session to inspect per-step usage.</p>
-        <table>
-          <thead>
-            <tr><th>Session</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th><th>Reasoning</th><th title="What the runtime reported">Reported USD</th><th title="List-price estimate from the embedded catalog">Est. USD</th><th>Events</th></tr>
-          </thead>
-          <tbody id="token-sessions"></tbody>
-        </table>
-      </section>
-
-      <section class="panel">
-        <h2>By User</h2>
-        <table>
-          <thead>
-            <tr><th>User</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th><th>Reasoning</th><th title="What the runtime reported">Reported USD</th><th title="List-price estimate from the embedded catalog">Est. USD</th><th>Events</th></tr>
-          </thead>
-          <tbody id="token-users"></tbody>
-        </table>
-      </section>
-
-      <section class="panel" id="token-session-panel" hidden>
-        <h2 id="token-session-title">Session Detail</h2>
-        <table>
-          <thead>
-            <tr><th>Step</th><th>Model</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th><th>Reasoning</th><th title="What the runtime reported">Reported USD</th><th title="List-price estimate from the embedded catalog">Est. USD</th></tr>
-          </thead>
-          <tbody id="token-session-detail"></tbody>
-        </table>
-      </section>
-
-      <section class="panel">
-        <h2>By CI Run</h2>
-        <table>
-          <thead>
-            <tr><th>Run</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th><th>Reasoning</th><th title="What the runtime reported">Reported USD</th><th title="List-price estimate from the embedded catalog">Est. USD</th><th>Events</th></tr>
-          </thead>
-          <tbody id="token-runs"></tbody>
-        </table>
-      </section>
-
-      <section class="panel">
-        <h2>By Harness</h2>
-        <table>
-          <thead>
-            <tr><th>Harness</th><th>Input</th><th>Output</th><th>Cache Read</th><th>Cache Create</th><th>Reasoning</th><th title="What the runtime reported">Reported USD</th><th title="List-price estimate from the embedded catalog">Est. USD</th><th>Events</th></tr>
-          </thead>
-          <tbody id="token-harnesses"></tbody>
-        </table>
-      </section>
+      <!-- Legacy containers kept for compatibility; hidden. -->
+      <div hidden>
+        <div id="token-cards"></div>
+        <div id="token-efficiency"></div>
+        <div id="token-split"></div>
+        <div id="token-breakdowns"></div>
+        <div id="token-throughput"></div>
+        <div id="token-models"></div>
+        <div id="token-sessions"></div>
+        <div id="token-users"></div>
+        <div id="token-runs"></div>
+        <div id="token-harnesses"></div>
+        <div id="token-health"></div>
+        <span id="log-path"></span>
+      </div>
     </main>
 
+    <div class="trend-tooltip" id="trend-tooltip"></div>
+    <script src="/i18n.js"></script>
+    <script src="/token-insights.js"></script>
+    <script src="/token-agent-view.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

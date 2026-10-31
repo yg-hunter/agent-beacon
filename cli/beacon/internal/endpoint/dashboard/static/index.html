@@ -3,51 +3,77 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Beacon | Self‑improving memory for coding agents</title>
+    <title data-i18n="Beacon | Self‑improving memory for coding agents">Beacon | Self‑improving memory for coding agents</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="/i18n.css" />
+    <script>
+      try {
+        var __lang = new URLSearchParams(location.search).get("lang");
+        if (!__lang) {
+          try { __lang = localStorage.getItem("beacon.dashboard.language"); } catch (e) {}
+        }
+        if (__lang === "zh-CN") {
+          document.documentElement.classList.add("i18n-pending");
+        }
+      } catch (e) {}
+      setTimeout(function () {
+        document.documentElement.classList.remove("i18n-pending");
+      }, 3000);
+    </script>
+    <style>html.i18n-pending body { visibility: hidden; }</style>
   </head>
   <body data-page="sessions">
     <header class="topbar">
       <div>
-        <p class="eyebrow">Local-only</p>
-        <h1>Agent Activity</h1>
+        <div class="page-head">
+          <h1 data-i18n="Session Audit">Session Audit</h1>
+          <p class="page-subtitle" data-i18n="Filter sessions by time, user, Agent, model, severity, category, project and environment">Filter sessions by time, user, Agent, model, severity, category, project and environment</p>
+        </div>
       </div>
-      <nav class="nav-toggle" aria-label="Dashboard navigation">
-        <div class="nav-section">
-          <div class="nav-section-title">Overview</div>
-          <a href="/findings.html">Findings</a>
+      <div class="topbar-actions">
+        <span class="status-pill" id="shell-status" role="status"></span>
+        <span class="shell-clock" id="shell-clock"></span>
+        <div class="lang-toggle" id="shell-lang">
+          <button type="button" data-lang="zh-CN">中</button>
+          <button type="button" data-lang="en">EN</button>
         </div>
-        <div class="nav-section">
-          <div class="nav-parent">Analytics</div>
-          <a href="/tokens.html">Token Usage</a>
-          <a href="/overview.html">Agent Activity</a>
-          <a href="/memory.html">Memory</a>
-        </div>
-        <div class="nav-section">
-          <div class="nav-section-title">Observe</div>
-          <a href="/inventory.html">Agent Inventory</a>
-          <a class="active" aria-current="page" href="/">Agent Activity Sessions</a>
-        </div>
-        <div class="nav-section">
-          <div class="nav-section-title">Control</div>
-          <a href="/detections.html">Detections</a>
-        </div>
-      </nav>
+        <button type="button" class="btn-secondary" id="shell-refresh" data-i18n="Refresh">Refresh</button>
+      </div>
+    <nav class="nav-toggle" aria-label="Dashboard navigation" data-i18n-aria-label="Dashboard navigation">
+      <a class="nav-brand" href="/"><svg class="nav-logo" aria-hidden="true" viewBox="0 0 48 48"><rect width="48" height="48" rx="11" fill="#2f6f62"/><g fill="#ffffff"><path d="M24 8c5.6 5.6 5.6 11.8 0 15.4-5.6-3.6-5.6-9.8 0-15.4z"/><path d="M40 24c-5.6 5.6-11.8 5.6-15.4 0 3.6-5.6 9.8-5.6 15.4 0z"/><path d="M24 40c-5.6-5.6-5.6-11.8 0-15.4 5.6 3.6 5.6 9.8 0 15.4z"/><path d="M8 24c5.6-5.6 11.8-5.6 15.4 0-3.6 5.6-9.8 5.6-15.4 0z"/><circle cx="24" cy="24" r="3"/></g></svg><span class="nav-brand-text"><strong>Beacon</strong><span data-i18n="Local agent audit">Agent audit</span></span></a>
+      <a href="/overview.html" data-i18n="Agent Activity">Agent Activity</a>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M7 16v-5"/><path d="M12 16V8"/><path d="M17 16v-8"/></svg><span data-i18n="Analytics">Analytics</span></div>
+      <a href="/tokens.html" data-i18n="Token Usage">Token Usage</a>
+      </div>
+      <div class="nav-group">
+      <a href="/" class="active" aria-current="page" data-i18n="Session Audit">Session Audit</a>
+      </div>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg><span data-i18n="Observe">Observe</span></div>
+      <a href="/findings.html" data-i18n="Findings">Findings</a>
+      <a href="/detections.html" data-i18n="Detections">Detections</a>
+      </div>
+      <div class="nav-group">
+      <div class="nav-group-title"><svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/></svg><span data-i18n="Assets and memory">Assets and memory</span></div>
+      <a href="/inventory.html" data-i18n="Agent Inventory">Agent Inventory</a>
+      <a href="/inventory-hooks.html" data-i18n="Hook Assets">Hook Assets</a>
+      <a href="/memory.html" data-i18n="Memory">Memory</a>
+      </div>
+<div class="local-mode-card">
+        <strong><span class="local-dot"></span><span data-i18n="Local mode">Local mode</span></strong>
+        <span data-i18n="Data stays on this machine; no cloud account.">Data stays on this machine; no cloud account.</span>
+        <div class="local-version" id="shell-version"></div>
+      </div>
+    </nav>
     </header>
 
     <main>
-      <section class="dashboard-hero activity-page-head">
-        <div>
-          <h2>Agent Activity</h2>
-          <p class="muted">Detailed local endpoint sessions and events across prompts, tools, commands, files, approvals, MCP activity, models, and repositories.</p>
-        </div>
-      </section>
-
       <section class="panel status-panel">
         <div>
-          <h2>Endpoint</h2>
-          <p id="log-path" class="muted">Loading runtime log...</p>
+          <h2 data-i18n="Endpoint">Endpoint</h2>
+          <p id="log-path" class="muted" data-i18n="Loading runtime log...">Loading runtime log...</p>
         </div>
         <div id="last-updated" class="muted"></div>
       </section>
@@ -55,70 +81,70 @@
       <section class="panel search-panel">
         <form id="filters" class="search-form">
           <div class="filter-section">
-            <div class="session-filter-tabs" aria-label="Session filters">
-              <button type="button" data-session-state="all">All sessions</button>
-              <button type="button" data-session-state="captured" class="active" aria-pressed="true">Captured sessions</button>
-              <button type="button" data-session-state="recurring">Recurring sessions</button>
-              <button type="button" data-session-state="empty">Empty sessions</button>
+            <div class="session-filter-tabs" aria-label="Session filters" data-i18n-aria-label="Session filters">
+              <button type="button" data-session-state="all" data-i18n="All sessions">All sessions</button>
+              <button type="button" data-session-state="captured" class="active" aria-pressed="true" data-i18n="Captured sessions">Captured sessions</button>
+              <button type="button" data-session-state="recurring" data-i18n="Recurring sessions">Recurring sessions</button>
+              <button type="button" data-session-state="empty" data-i18n="Empty sessions">Empty sessions</button>
             </div>
-            <p class="session-filter-help muted">Recurring sessions are repeated executions of the same prompt in the same repository and agent harness by the same user.</p>
+            <p class="session-filter-help muted" data-i18n="Recurring sessions are repeated executions of the same prompt in the same repository and agent harness by the same user.">Recurring sessions are repeated executions of the same prompt in the same repository and agent harness by the same user.</p>
             <div class="session-filter-grid">
               <label>
-                <select id="range-filter" aria-label="Date range">
-                  <option value="30d">Last 30 days</option>
-                  <option value="7d">Last 7 days</option>
-                  <option value="24h">Last 24 hours</option>
-                  <option value="all">All time</option>
+                <select id="range-filter" aria-label="Date range" data-i18n-aria-label="Date range">
+                  <option value="30d" data-i18n="Last 30 days">Last 30 days</option>
+                  <option value="7d" data-i18n="Last 7 days">Last 7 days</option>
+                  <option value="24h" data-i18n="Last 24 hours">Last 24 hours</option>
+                  <option value="all" data-i18n="All time">All time</option>
                 </select>
               </label>
               <label>
-                <select aria-label="User" disabled>
-                  <option>All users</option>
+                <select aria-label="User" data-i18n-aria-label="User" disabled>
+                  <option value="All users" data-i18n="All users">All users</option>
                 </select>
               </label>
               <label>
-                <select name="harness" id="harness-filter" aria-label="Agent harness">
-                  <option value="">All agent harnesses</option>
+                <select name="harness" id="harness-filter" aria-label="Agent harness" data-i18n-aria-label="Agent harness">
+                  <option value="" data-i18n="All agent harnesses">All agent harnesses</option>
                 </select>
               </label>
               <label>
-                <select name="model" id="model-filter" aria-label="Model">
-                  <option value="">All models</option>
+                <select name="model" id="model-filter" aria-label="Model" data-i18n-aria-label="Model">
+                  <option value="" data-i18n="All models">All models</option>
                 </select>
               </label>
               <label>
-                <select name="severity" aria-label="Severity">
-                  <option value="">Any severity</option>
-                  <option value="info">Info</option>
-                  <option value="low">Low</option>
-                  <option value="medium">Medium</option>
-                  <option value="high">High</option>
-                  <option value="critical">Critical</option>
+                <select name="severity" aria-label="Severity" data-i18n-aria-label="Severity">
+                  <option value="" data-i18n="Any severity">Any severity</option>
+                  <option value="info" data-i18n="Info">Info</option>
+                  <option value="low" data-i18n="Low">Low</option>
+                  <option value="medium" data-i18n="Medium">Medium</option>
+                  <option value="high" data-i18n="High">High</option>
+                  <option value="critical" data-i18n="Critical">Critical</option>
                 </select>
               </label>
               <label>
-                <select name="category" aria-label="Category">
-                  <option value="">Any category</option>
-                  <option value="prompt">Prompt</option>
-                  <option value="tool">Tool</option>
-                  <option value="command">Command</option>
-                  <option value="file">File</option>
+                <select name="category" aria-label="Category" data-i18n-aria-label="Category">
+                  <option value="" data-i18n="Any category">Any category</option>
+                  <option value="prompt" data-i18n="Prompt">Prompt</option>
+                  <option value="tool" data-i18n="Tool">Tool</option>
+                  <option value="command" data-i18n="Command">Command</option>
+                  <option value="file" data-i18n="File">File</option>
                   <option value="mcp">MCP</option>
-                  <option value="approval">Approval</option>
-                  <option value="session">Session</option>
-                  <option value="inventory">Inventory</option>
-                  <option value="validation">Validation</option>
-                  <option value="metric">Metric</option>
+                  <option value="approval" data-i18n="Approval">Approval</option>
+                  <option value="session" data-i18n="Session">Session</option>
+                  <option value="inventory" data-i18n="Inventory">Inventory</option>
+                  <option value="validation" data-i18n="Validation">Validation</option>
+                  <option value="metric" data-i18n="Metric">Metric</option>
                 </select>
               </label>
               <label>
-                <select name="repository" id="repository-filter" aria-label="Repository">
-                  <option value="">All repositories</option>
+                <select name="repository" id="repository-filter" aria-label="Repository" data-i18n-aria-label="Repository">
+                  <option value="" data-i18n="All repositories">All repositories</option>
                 </select>
               </label>
               <label>
-                <select aria-label="Environment" disabled>
-                  <option>All environments</option>
+                <select aria-label="Environment" data-i18n-aria-label="Environment" disabled>
+                  <option value="All environments" data-i18n="All environments">All environments</option>
                 </select>
               </label>
             </div>
@@ -126,17 +152,17 @@
               <label class="search-field">
                 <span class="search-input-wrap">
                   <span class="search-icon" aria-hidden="true"></span>
-                  <input class="search-input" name="q" placeholder="Search sessions, repos, users, models..." autocomplete="off" aria-label="Search sessions, repositories, users, and models" />
+                  <input class="search-input" name="q" placeholder="Search sessions, repos, users, models..." data-i18n-placeholder="Search sessions, repos, users, models..." autocomplete="off" aria-label="Search sessions, repositories, users, and models" data-i18n-aria-label="Search sessions, repositories, users, and models" />
                 </span>
               </label>
             </div>
-            <div class="quick-filters" aria-label="Quick filters">
-              <button type="button" data-preset="all" class="active">All</button>
-              <button type="button" data-preset="destructive">Contains destructive action</button>
-              <button type="button" data-preset="review">Needs review</button>
-              <button type="button" data-preset="high-risk">High risk</button>
-              <button type="button" data-preset="commands">Has commands</button>
-              <button type="button" data-preset="writes">Has writes</button>
+            <div class="quick-filters" aria-label="Quick filters" data-i18n-aria-label="Quick filters">
+              <button type="button" data-preset="all" class="active" data-i18n="All">All</button>
+              <button type="button" data-preset="destructive" data-i18n="Contains destructive action">Contains destructive action</button>
+              <button type="button" data-preset="review" data-i18n="Needs review">Needs review</button>
+              <button type="button" data-preset="high-risk" data-i18n="High risk">High risk</button>
+              <button type="button" data-preset="commands" data-i18n="Has commands">Has commands</button>
+              <button type="button" data-preset="writes" data-i18n="Has writes">Has writes</button>
               <button type="button" data-preset="mcp">MCP</button>
             </div>
           </div>
@@ -161,15 +187,15 @@
           <table>
             <thead>
               <tr>
-                <th>Session ID</th>
-                <th>Risk</th>
-                <th>Agent Harness</th>
-                <th>Session Prompt</th>
-                <th>Activity</th>
-                <th class="col-timestamp">Start</th>
-                <th class="col-timestamp">End</th>
-                <th class="col-duration">Duration</th>
-                <th class="col-message">Last Event</th>
+                <th data-i18n="Session ID">Session ID</th>
+                <th data-i18n="Risk">Risk</th>
+                <th data-i18n="Agent Harness">Agent Harness</th>
+                <th data-i18n="Session Prompt">Session Prompt</th>
+                <th data-i18n="Activity">Activity</th>
+                <th class="col-timestamp" data-i18n="Start">Start</th>
+                <th class="col-timestamp" data-i18n="End">End</th>
+                <th class="col-duration" data-i18n="Duration">Duration</th>
+                <th class="col-message" data-i18n="Last Event">Last Event</th>
               </tr>
             </thead>
             <tbody id="events"></tbody>
@@ -179,6 +205,7 @@
 
     </main>
 
+    <script src="/i18n.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

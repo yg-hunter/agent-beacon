@@ -1,0 +1,19 @@
+{
+  "name": "beacon-dashboard-i18n-checks",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "24.19.0" },
+  "scripts": {
+    "test": "node --test *.test.mjs",
+    "format": "prettier --config .prettierrc.json --check ../../static/i18n.js ../../static/token-insights.js ../../static/token-agent-view.js ../../static/i18n.css *.test.mjs ../../eslint.config.mjs",
+    "lint": "cd ../.. && node testdata/i18n/node_modules/eslint/bin/eslint.js static/i18n.js static/token-insights.js static/token-agent-view.js testdata/i18n/*.test.mjs eslint.config.mjs --max-warnings 0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.1",
+    "acorn": "8.15.0",
+    "eslint": "9.39.1",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "16.5.0",
+    "prettier": "3.6.2"
+  }
+}

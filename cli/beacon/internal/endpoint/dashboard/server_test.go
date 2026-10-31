@@ -647,7 +647,8 @@ func TestStaticDashboardPagesServe(t *testing.T) {
 		{path: "/", want: "Beacon | Self‑improving memory for coding agents"},
 		{path: "/session.html", want: "Beacon | Self‑improving memory for coding agents"},
 		{path: "/overview.html", want: "Beacon | Self‑improving memory for coding agents"},
-		{path: "/tokens.html", want: "Beacon | Self‑improving memory for coding agents"},
+		// tokens.html carries the redesigned Calicat page title; the other pages keep the product title.
+		{path: "/tokens.html", want: "Beacon | Token usage"},
 		{path: "/memory.html", want: "Beacon | Self‑improving memory for coding agents"},
 		{path: "/detections.html", want: "Beacon | Self‑improving memory for coding agents"},
 		{path: "/findings.html", want: "Beacon | Self‑improving memory for coding agents"},
