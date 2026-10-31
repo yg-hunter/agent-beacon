@@ -75,8 +75,12 @@ func runEndpointDashboard(cmd *cobra.Command, args []string) error {
 	if endpointOpts.dashboardAddr == "" {
 		endpointOpts.dashboardAddr = dashboard.DefaultAddr
 	}
-	if err := dashboard.ValidateLoopbackAddr(endpointOpts.dashboardAddr); err != nil {
-		return err
+	// With --remote-token the operator explicitly opted into LAN exposure, so the
+	// loopback pre-check steps aside; the token gate still guards every request.
+	if endpointOpts.dashboardRemoteToken == "" {
+		if err := dashboard.ValidateLoopbackAddr(endpointOpts.dashboardAddr); err != nil {
+			return err
+		}
 	}
 	url := dashboard.URL(endpointOpts.dashboardAddr)
 	fmt.Printf("Beacon endpoint dashboard: %s\n", url)
@@ -99,6 +103,7 @@ func runEndpointDashboard(cmd *cobra.Command, args []string) error {
 		Addr:        endpointOpts.dashboardAddr,
 		LogPath:     endpointOpts.logPath,
 		UserMode:    userMode,
+		RemoteToken: endpointOpts.dashboardRemoteToken,
 	})
 }
 

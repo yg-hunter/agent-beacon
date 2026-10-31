@@ -107,6 +107,21 @@
         </div>
         <div class="attention-list section-pad" id="overview-attention"></div>
       </section>
+
+      <section class="panel">
+        <div class="chart-head section-pad">
+          <h2 data-i18n="Remote hosts">Remote hosts</h2>
+          <span class="scope-note" data-i18n="Poll another machine's read-only beacon API; plain HTTP is visible on that network">Poll another machine's read-only beacon API; plain HTTP is visible on that network</span>
+        </div>
+        <div class="table-toolbar">
+          <input type="text" id="remote-name" data-i18n-placeholder="Name" placeholder="Name">
+          <input type="text" id="remote-url" data-i18n-placeholder="Address (http://ip:port)" placeholder="Address (http://ip:port)">
+          <input type="password" id="remote-token" data-i18n-placeholder="Access token" placeholder="Access token">
+          <button type="button" class="btn-primary" id="remote-add" data-i18n="Add source">Add source</button>
+          <span class="scope-note" id="remote-feedback" role="status"></span>
+        </div>
+        <div class="remote-cards section-pad" id="remote-cards"></div>
+      </section>
     </main>
 
     <script src="/i18n.js?v=2"></script>

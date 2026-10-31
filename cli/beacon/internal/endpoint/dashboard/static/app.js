@@ -306,6 +306,55 @@ function renderOverviewPage() {
   renderOverviewHourly(sessions);
   renderOverviewSources(sessions, summary);
   renderOverviewAttention(summary);
+  loadRemoteSources().catch(console.error);
+}
+
+async function loadRemoteSources() {
+  const listEl = $("#remote-cards");
+  if (!listEl) return;
+  let sources = [];
+  try {
+    const resp = await getJSON("/api/remote-sources");
+    sources = resp?.sources ?? [];
+  } catch (error) {
+    listEl.innerHTML = `<p class="muted">${escapeHTML(String(error.message || error))}</p>`;
+    return;
+  }
+  if (!sources.length) {
+    listEl.innerHTML = `<p class="muted">${escapeHTML(t("No remote sources added yet"))}</p>`;
+    return;
+  }
+  listEl.innerHTML = sources
+    .map(
+      (source) =>
+        `<div class="remote-card" id="remote-${escapeHTML(source.id)}"><div class="remote-title"><strong>${escapeHTML(source.name)}</strong><span class="muted">${escapeHTML(source.url)}</span></div><div class="remote-kpi muted" data-remote-kpi="${escapeHTML(source.id)}">${escapeHTML(t("Checking..."))}</div><button type="button" class="btn-secondary" data-remote-remove="${escapeHTML(source.id)}">${escapeHTML(t("Remove"))}</button></div>`,
+    )
+    .join("");
+  for (const source of sources) {
+    const kpiEl = listEl.querySelector(`[data-remote-kpi="${source.id}"]`);
+    if (!kpiEl) continue;
+    try {
+      const summary = await getJSON(`/api/remote-sources/${source.id}/summary`);
+      kpiEl.innerHTML =
+        `<span class="state-pill ok">${escapeHTML(t("Online"))}</span> ` +
+        escapeHTML(
+          t("{sessions} sessions · {events} events · {tools} tool calls", {
+            sessions: summary.active_sessions ?? 0,
+            events: summary.total_events ?? 0,
+            tools: summary.tool_events ?? 0,
+          }),
+        );
+    } catch (error) {
+      kpiEl.innerHTML = `<span class="state-pill danger">${escapeHTML(t("Unreachable"))}</span> ${escapeHTML(String(error.message || error))}`;
+    }
+  }
+  for (const button of listEl.querySelectorAll("[data-remote-remove]")) {
+    button.addEventListener("click", async () => {
+      await fetch(`/api/remote-sources/${button.dataset.remoteRemove}`, { method: "DELETE" });
+      window.clearDataCache("/api/remote-sources");
+      loadRemoteSources().catch(console.error);
+    });
+  }
 }
 
 function renderOverviewKpis(summary) {
@@ -4181,6 +4230,39 @@ function setupShell() {
     refresh.addEventListener("click", () => {
       if (typeof window.__beaconForceRefresh === "function") {
         window.__beaconForceRefresh();
+      }
+    });
+  }
+  const remoteAdd = $("#remote-add");
+  if (remoteAdd) {
+    remoteAdd.addEventListener("click", async () => {
+      const feedback = $("#remote-feedback");
+      const body = {
+        name: $("#remote-name")?.value ?? "",
+        url: $("#remote-url")?.value ?? "",
+        token: $("#remote-token")?.value ?? "",
+      };
+      try {
+        const response = await fetch("/api/remote-sources", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}));
+          if (feedback) feedback.textContent = payload.error || String(response.status);
+          return;
+        }
+        for (const id of ["remote-name", "remote-url", "remote-token"]) {
+          const input = document.getElementById(id);
+          if (input) input.value = "";
+        }
+        if (feedback) feedback.textContent = t("Source added");
+        // Mutations must not be masked by the stale-while-revalidate cache.
+        window.clearDataCache("/api/remote-sources");
+        loadRemoteSources().catch(console.error);
+      } catch (error) {
+        if (feedback) feedback.textContent = String(error.message || error);
       }
     });
   }

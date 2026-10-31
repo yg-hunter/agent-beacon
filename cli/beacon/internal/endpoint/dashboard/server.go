@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,13 @@ type Options struct {
 	// LensFiles are lens files served alongside the built-ins, read from disk on every request.
 	// They are for developing a lens; the dashboard never writes them.
 	LensFiles []string
+	// RemoteToken opts the dashboard into LAN/remote exposure: every request must
+	// carry this bearer token and the dashboard freezes to read-only. Without it
+	// the loopback-only validation stays in force.
+	RemoteToken string
+	// RemoteSources overrides the remote-source registry (test seam). nil uses
+	// the per-user registry under ~/.beacon/endpoint/.
+	RemoteSources *remoteSourceStore
 }
 
 type StatusResponse struct {
@@ -479,21 +487,34 @@ func Handler(opts Options) (http.Handler, error) {
 		}
 		writeJSON(w, record)
 	})
+	remoteStore := opts.RemoteSources
+	if remoteStore == nil {
+		remoteStore = defaultRemoteSourceStore()
+	}
+	registerRemoteSourceRoutes(mux, remoteStore)
 	// Statics are embedded, so revalidation is nearly free while a stale cached
 	// stylesheet or script after an upgrade is confusing; no-cache forces the check.
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-cache")
 		http.FileServer(http.FS(staticRoot)).ServeHTTP(w, r)
 	}))
-	return securityHeaders(mux), nil
+	var handler http.Handler = securityHeaders(mux)
+	if opts.RemoteToken != "" {
+		handler = remoteAccessGate(handler, opts.RemoteToken)
+	}
+	return handler, nil
 }
 
 func ListenAndServe(opts Options) error {
 	if opts.Addr == "" {
 		opts.Addr = DefaultAddr
 	}
-	if err := ValidateLoopbackAddr(opts.Addr); err != nil {
-		return err
+	if opts.RemoteToken == "" {
+		if err := ValidateLoopbackAddr(opts.Addr); err != nil {
+			return err
+		}
+	} else if _, port, err := net.SplitHostPort(opts.Addr); err != nil || port == "" {
+		return fmt.Errorf("remote exposure requires an explicit port: %w", err)
 	}
 	handler, err := Handler(opts)
 	if err != nil {
@@ -535,6 +556,44 @@ func RequireLoopbackHost(next http.Handler) http.Handler {
 		ip := net.ParseIP(host)
 		if !strings.EqualFold(host, "localhost") && (ip == nil || !ip.IsLoopback()) {
 			writeError(w, http.StatusForbidden, fmt.Errorf("request host must be a loopback address"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// remoteAccessGate gates every request behind a bearer token and freezes the
+// dashboard to read-only while it listens on a non-loopback address. The token
+// is accepted as a header, a cookie, or a one-time ?token= query value that
+// then sets the cookie so the browser UI keeps working on the remote machine.
+func remoteAccessGate(next http.Handler, token string) http.Handler {
+	expected := []byte(token)
+	valid := func(provided string) bool {
+		return subtle.ConstantTimeCompare([]byte(provided), expected) == 1
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provided := r.Header.Get("X-Beacon-Token")
+		if provided == "" {
+			if cookie, err := r.Cookie("beacon_remote_token"); err == nil {
+				provided = cookie.Value
+			}
+		}
+		if !valid(provided) && valid(r.URL.Query().Get("token")) {
+			http.SetCookie(w, &http.Cookie{
+				Name:     "beacon_remote_token",
+				Value:    r.URL.Query().Get("token"),
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteLaxMode,
+			})
+			provided = r.URL.Query().Get("token")
+		}
+		if !valid(provided) {
+			writeError(w, http.StatusUnauthorized, errors.New("missing or invalid access token"))
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeError(w, http.StatusForbidden, errors.New("remote access is read-only"))
 			return
 		}
 		next.ServeHTTP(w, r)

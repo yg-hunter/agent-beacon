@@ -77,6 +77,7 @@ var endpointOpts struct {
 	dashboardAddr             string
 	dashboardOpen             bool
 	dashboardNativeUsage      bool
+	dashboardRemoteToken      string
 	includeEventSummaries     bool
 	includeRawEvents          bool
 	writeInventoryEvent       bool
@@ -472,6 +473,7 @@ func init() {
 	endpointDashboardCmd.Flags().StringVar(&endpointOpts.logPath, "log-path", "", "Runtime JSONL log path")
 	endpointDashboardCmd.Flags().StringVar(&endpointOpts.dashboardAddr, "addr", dashboard.DefaultAddr, "Local dashboard listen address")
 	endpointDashboardCmd.Flags().BoolVar(&endpointOpts.dashboardNativeUsage, "native-usage", false, "Read native local usage snapshots (ZCode and verified Grok imports)")
+	endpointDashboardCmd.Flags().StringVar(&endpointOpts.dashboardRemoteToken, "remote-token", "", "Require this bearer token for every dashboard request and allow non-loopback listening (read-only)")
 	endpointDashboardCmd.Flags().BoolVar(&endpointOpts.dashboardOpen, "open", false, "Open the dashboard in a browser")
 
 	for _, c := range []*cobra.Command{endpointTracesStatusCmd, endpointTracesReindexCmd, endpointTracesListCmd, endpointTracesSearchCmd, endpointTracesShowCmd} {

@@ -5208,3 +5208,43 @@ main > section:empty {
 #detection-search {
   min-width: 200px;
 }
+
+/* ---- Remote hosts (design extension: LAN pull monitoring) ---- */
+.remote-cards {
+  display: grid;
+  gap: 0.7rem;
+}
+.remote-card {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding: 0.7rem 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+}
+.remote-card .remote-title {
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  font-size: 0.8rem;
+}
+.remote-card .remote-kpi {
+  flex: 1;
+  font-size: 0.76rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.remote-card .btn-secondary {
+  flex: none;
+}
+#remote-name {
+  min-width: 140px;
+}
+#remote-url {
+  min-width: 220px;
+}
+#remote-token {
+  min-width: 160px;
+}
