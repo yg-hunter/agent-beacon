@@ -67,6 +67,10 @@ var usageExpectation = map[string]struct {
 	expect string
 	reason string
 }{
+	"workbuddy":     {ExpectReported, "read-only native request usage records"},
+	"autoclaw":      {ExpectReported, "read-only legacy response usage and 2.x run snapshots"},
+	"doubao_work":   {ExpectNone, "local task trajectories contain activity but no token counters"},
+	"zcode":         {ExpectReported, "read-only local model_usage request attempts"},
 	"claude_code":   {ExpectReported, "OTLP token and cost telemetry"},
 	"codex_cli":     {ExpectReported, "per-turn usage trace; Codex emits no cost"},
 	"codex_desktop": {ExpectReported, "per-turn usage trace; Codex emits no cost"},

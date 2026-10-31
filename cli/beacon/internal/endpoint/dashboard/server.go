@@ -1,13 +1,17 @@
 package dashboard
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -29,9 +33,11 @@ const DefaultAddr = "127.0.0.1:8765"
 var staticFiles embed.FS
 
 type Options struct {
-	Addr     string
-	LogPath  string
-	UserMode bool
+	// NativeUsage opts into read-only native usage and verified local imports.
+	NativeUsage bool
+	Addr        string
+	LogPath     string
+	UserMode    bool
 	// LensFiles are lens files served alongside the built-ins, read from disk on every request.
 	// They are for developing a lens; the dashboard never writes them.
 	LensFiles []string
@@ -104,6 +110,10 @@ func Handler(opts Options) (http.Handler, error) {
 	}
 	lenses.storeDir = lensstore.Dir(rulesUserMode)
 	mux := http.NewServeMux()
+
+	nativeSource := defaultNativeUsage(opts.LogPath)
+	nativeSource.enabled = opts.NativeUsage
+	tokenCache := &tokenReportCache{}
 	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -153,7 +163,13 @@ func Handler(opts Options) (http.Handler, error) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		writeJSON(w, BuildSummary(events))
+		summary := BuildSummary(events)
+		nativeCtx, cancelSummaryNative := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancelSummaryNative()
+		if nativeRows, _ := nativeSource.read(nativeCtx); len(nativeRows) > 0 {
+			summary.UsageHarnesses, summary.UsageModels = nativeUsageFacets(nativeRows)
+		}
+		writeJSON(w, summary)
 	})
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -301,6 +317,50 @@ func Handler(opts Options) (http.Handler, error) {
 		}
 		writeJSON(w, resp)
 	})
+	mux.HandleFunc("/api/native-usage/import", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w)
+			return
+		}
+		if r.Header.Get("Content-Type") != "application/json" || (r.Header.Get("Origin") != "" && r.Header.Get("Origin") != "http://"+r.Host) {
+			writeError(w, http.StatusForbidden, fmt.Errorf("same-origin JSON required"))
+			return
+		}
+		if !nativeSource.enabled {
+			writeError(w, http.StatusConflict, fmt.Errorf("native usage disabled"))
+			return
+		}
+		data, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 8*1024*1024))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		rows, err := parseGrokImport(data)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		file, err := os.CreateTemp(filepath.Dir(nativeSource.importPath), "grok-import-*.tmp")
+		if err != nil {
+			writeError(w, 500, err)
+			return
+		}
+		defer os.Remove(file.Name())
+		if _, err = file.Write(data); err != nil {
+			file.Close()
+			writeError(w, 500, err)
+			return
+		}
+		if err = file.Close(); err != nil {
+			writeError(w, 500, err)
+			return
+		}
+		if err = os.Rename(file.Name(), nativeSource.importPath); err != nil {
+			writeError(w, 500, err)
+			return
+		}
+		writeJSON(w, map[string]interface{}{"imported": len(rows)})
+	})
 	mux.HandleFunc("/api/tokens", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w)
@@ -310,18 +370,34 @@ func Handler(opts Options) (http.Handler, error) {
 		// unfiltered SessionStart context for user attribution. tokenOptions
 		// carries the session, so AggregateScopedWithContexts applies the exact
 		// session filter; the dashboard never scopes by run.
-		events, contexts, err := ReadTokenEventsAppendOrder(opts.LogPath, parseQuery(r, maxEventLimit))
+		nativeCtx, cancelNative := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancelNative()
+		nativeRows, nativeWarnings := nativeSource.read(nativeCtx)
+		query := parseQuery(r, maxEventLimit)
+		fingerprint, fingerprintErr := nativeFingerprint(nativeRows)
+		if fingerprintErr != nil {
+			writeError(w, 500, fingerprintErr)
+			return
+		}
+		report, err := tokenCache.load(r.URL.Query().Encode()+fingerprint, []string{opts.LogPath, pricing.DefaultOverridesPath(rulesUserMode), nativeSource.dbPath, nativeSource.dbPath + "-wal", nativeSource.importPath}, func() (tokens.Report, error) {
+			events, contexts, err := ReadTokenEventsAppendOrder(opts.LogPath, parseQuery(r, maxEventLimit))
+			if err != nil {
+				return tokens.Report{}, err
+			}
+			events = mergeNativeEvents(events, nativeEvents(nativeRows, query))
+			tokenOpts := tokenOptions(r)
+			// Invalid overrides retain the existing catalog fallback and error metadata.
+			tokenOpts.Pricer, _ = pricing.LoadPricer(pricing.Default(), pricing.DefaultOverridesPath(rulesUserMode), false)
+			return tokens.AggregateScopedWithContexts(events, contexts, "", tokenOpts), nil
+		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		tokenOpts := tokenOptions(r)
-		// The same overrides file `beacon token-usage` reads by default, re-read on every request
-		// so an edit shows on the next reload. The dashboard only reads it. An invalid file does
-		// not fail the view: the estimate falls back to list prices and the response's
-		// pricing.overrides.error says why.
-		tokenOpts.Pricer, _ = pricing.LoadPricer(pricing.Default(), pricing.DefaultOverridesPath(rulesUserMode), false)
-		writeJSON(w, tokens.AggregateScopedWithContexts(events, contexts, "", tokenOpts))
+		writeJSON(w, struct {
+			tokens.Report
+			Native nativeUsageSummary `json:"native"`
+		}{report, summarizeNative(nativeRows, nativeWarnings, query)})
 	})
 	// Coverage answers a different question from the rollup above -- "is this all of it" rather
 	// than "what did it cost" -- so it gets its own route rather than a flag on /api/tokens. A
@@ -346,6 +422,10 @@ func Handler(opts Options) (http.Handler, error) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		nativeCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+		defer cancel()
+		nativeRows, _ := nativeSource.read(nativeCtx)
+		events = mergeNativeEvents(events, nativeEvents(nativeRows, EventQuery{Since: query.Since, Until: query.Until}))
 		writeJSON(w, buildTokenCoverage(events, query.Harness))
 	})
 	mux.HandleFunc("/api/detections", func(w http.ResponseWriter, r *http.Request) {
@@ -399,7 +479,12 @@ func Handler(opts Options) (http.Handler, error) {
 		}
 		writeJSON(w, record)
 	})
-	mux.Handle("/", http.FileServer(http.FS(staticRoot)))
+	// Statics are embedded, so revalidation is nearly free while a stale cached
+	// stylesheet or script after an upgrade is confusing; no-cache forces the check.
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		http.FileServer(http.FS(staticRoot)).ServeHTTP(w, r)
+	}))
 	return securityHeaders(mux), nil
 }
 

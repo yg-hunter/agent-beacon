@@ -143,7 +143,10 @@ type Options struct {
 }
 
 type Report struct {
+	ByAgentTime     []Group            `json:"by_agent_time,omitempty"`
 	Totals          Usage              `json:"totals"`
+	ByAgentModel    []Group            `json:"by_agent_model,omitempty"`
+	ByAgentProject  []Group            `json:"by_agent_project,omitempty"`
 	ByModel         []Group            `json:"by_model,omitempty"`
 	BySession       []Group            `json:"by_session,omitempty"`
 	ByUser          []Group            `json:"by_user,omitempty"`
@@ -239,6 +242,9 @@ func aggregate(events []schema.Event, opts Options, contextEvents []schema.Event
 	}
 	report.Pricing = priceUsageEvents(usageEvents, pricer)
 
+	byAgentTime := map[string]*Usage{}
+	byAgentModel := map[string]*Usage{}
+	byAgentProject := map[string]*Usage{}
 	byModel := map[string]*Usage{}
 	bySession := map[string]*Usage{}
 	byUser := map[string]*Usage{}
@@ -255,6 +261,8 @@ func aggregate(events []schema.Event, opts Options, contextEvents []schema.Event
 			continue
 		}
 		report.Totals.add(ue.usage)
+		addGroup(byAgentModel, ue.harness+" / "+ue.model, ue.usage)
+		addGroup(byAgentProject, ue.harness+" / "+ue.repository, ue.usage)
 		addGroup(byModel, ue.model, ue.usage)
 		addGroup(bySession, ue.session, ue.usage)
 		addGroup(byUser, ue.user, ue.usage)
@@ -263,6 +271,7 @@ func aggregate(events []schema.Event, opts Options, contextEvents []schema.Event
 		addGroup(byRun, ue.run, ue.usage)
 		if opts.BucketSize > 0 && !ue.ts.IsZero() {
 			start := ue.ts.Truncate(opts.BucketSize)
+			addGroup(byAgentTime, ue.harness+" / "+start.UTC().Format(time.RFC3339), ue.usage)
 			if buckets[start] == nil {
 				buckets[start] = &Usage{}
 			}
@@ -271,6 +280,9 @@ func aggregate(events []schema.Event, opts Options, contextEvents []schema.Event
 		eventsWithUsage++
 	}
 	report.EventsWithUsage = eventsWithUsage
+	report.ByAgentTime = sortedGroups(byAgentTime, opts.TopLimit)
+	report.ByAgentModel = sortedGroups(byAgentModel, opts.TopLimit)
+	report.ByAgentProject = sortedGroups(byAgentProject, opts.TopLimit)
 	report.ByModel = sortedGroups(byModel, opts.TopLimit)
 	report.BySession = sortedGroups(bySession, opts.TopLimit)
 	report.ByUser = sortedGroups(byUser, opts.TopLimit)
@@ -1092,7 +1104,9 @@ func buildUtilization(events []*usageEvent, nearLimitRatio float64) []ModelUtili
 	samples := map[string]map[string]*sample{}
 	reportedWindow := map[string]int64{}
 	for _, ue := range events {
-		if ue.model == "" {
+		// A run snapshot adds spend across multiple calls. It is not one context
+		// window sample, even when its connection model is known.
+		if ue.model == "" || ue.action == "token.usage.run" {
 			continue
 		}
 		// A reported context size is the measurement; summing the usage fields only approximates

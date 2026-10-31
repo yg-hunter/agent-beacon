@@ -40,9 +40,14 @@ type Summary struct {
 	PolicyBlockedEvents      int            `json:"policy_blocked_events"`
 	TopActions               []Count        `json:"top_actions"`
 	TopHarnesses             []Count        `json:"top_harnesses"`
-	TopModels                []Count        `json:"top_models"`
-	TopRepositories          []Count        `json:"top_repositories"`
-	TopMCPServers            []Count        `json:"top_mcp_servers"`
+	// Usage-only facets come from local usage snapshots whose sources never write
+	// runtime events, so the session audit filter can name them without pretending
+	// they have sessions.
+	UsageHarnesses  []Count `json:"usage_harnesses,omitempty"`
+	UsageModels     []Count `json:"usage_models,omitempty"`
+	TopModels       []Count `json:"top_models"`
+	TopRepositories []Count `json:"top_repositories"`
+	TopMCPServers   []Count `json:"top_mcp_servers"`
 }
 
 func BuildSummary(result EventResult) Summary {

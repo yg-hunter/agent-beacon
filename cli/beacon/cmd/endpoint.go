@@ -75,6 +75,7 @@ var endpointOpts struct {
 	falconCAFile              string
 	dashboardAddr             string
 	dashboardOpen             bool
+	dashboardNativeUsage      bool
 	includeEventSummaries     bool
 	includeRawEvents          bool
 	writeInventoryEvent       bool
@@ -467,6 +468,7 @@ func init() {
 	endpointDashboardCmd.Flags().BoolVar(&endpointOpts.systemMode, "system", false, "Use system endpoint paths and the system collector service")
 	endpointDashboardCmd.Flags().StringVar(&endpointOpts.logPath, "log-path", "", "Runtime JSONL log path")
 	endpointDashboardCmd.Flags().StringVar(&endpointOpts.dashboardAddr, "addr", dashboard.DefaultAddr, "Local dashboard listen address")
+	endpointDashboardCmd.Flags().BoolVar(&endpointOpts.dashboardNativeUsage, "native-usage", false, "Read native local usage snapshots (ZCode and verified Grok imports)")
 	endpointDashboardCmd.Flags().BoolVar(&endpointOpts.dashboardOpen, "open", false, "Open the dashboard in a browser")
 
 	for _, c := range []*cobra.Command{endpointTracesStatusCmd, endpointTracesReindexCmd, endpointTracesListCmd, endpointTracesSearchCmd, endpointTracesShowCmd} {
