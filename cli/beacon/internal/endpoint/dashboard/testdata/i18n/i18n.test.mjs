@@ -36,6 +36,7 @@ test('defaults to English and rejects invalid persisted language values', () => 
 test('uses a persisted Chinese preference, with an explicit URL override', () => {
   assert.equal(load({ saved: 'zh-CN' }).t('Token Usage'), 'Token 用量');
   assert.equal(load({ saved: 'zh-CN', query: '?lang=en&harness=cursor' }).language, 'en');
+  assert.equal(load({ saved: 'zh-CN' }).t('Findings results'), '风险发现结果');
 });
 
 test('storage failure is observable and leaves the dashboard usable', () => {
@@ -60,8 +61,10 @@ test('all dashboard pages load translations before rendering and include the lan
   assert.equal(pages.length, 9);
   for (const page of pages) {
     const html = fs.readFileSync(new URL(page, staticDir), 'utf8');
-    assert.ok(html.indexOf('src="/i18n.js"') < html.indexOf('src="/app.js"'), page);
-    assert.ok(html.includes('href="/i18n.css"'), page);
+    const i18n = html.search(/src="\/i18n\.js(?:\?[^" ]*)?"/u);
+    const app = html.search(/src="\/app\.js(?:\?[^" ]*)?"/u);
+    assert.ok(i18n >= 0 && app > i18n, page);
+    assert.match(html, /href="\/i18n\.css(?:\?[^" ]*)?"/u, page);
     assert.ok(html.includes('data-i18n="Token Usage"'), page);
   }
 });

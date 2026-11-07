@@ -9,6 +9,7 @@
   let currentSessions = null;
   let currentStatus = {};
   let coverageData = null;
+  let coverageState = 'pending';
   let projectMode = 'tokens';
   let trendMode = 'component';
   let trendScale = 'absolute';
@@ -52,10 +53,7 @@
     return `"${text.replaceAll('"', '""')}"`;
   }
 
-  function exportCSV() {
-    if (!snapshot) {
-      return;
-    }
+  function buildCSV(snapshot) {
     const columns = [
       'dimension',
       'key',
@@ -70,9 +68,18 @@
       'unpriced_events',
       'events',
     ];
+    const exportValue = (usage, key) => {
+      if (key === 'estimated_cost_usd') {
+        return window.BeaconAgentView?.estimateDetails(usage)?.value ?? null;
+      }
+      if (key === 'cost_usd' && !(usage?.cost_usd > 0)) {
+        return null;
+      }
+      return usage?.[key];
+    };
     const rows = [columns];
     const report = snapshot.report ?? {};
-    rows.push(['totals', 'all', ...columns.slice(2).map((key) => report.totals?.[key])]);
+    rows.push(['totals', 'all', ...columns.slice(2).map((key) => exportValue(report.totals, key))]);
     for (const dimension of [
       'by_model',
       'by_session',
@@ -85,7 +92,11 @@
       'by_agent_time',
     ]) {
       for (const group of report[dimension] ?? []) {
-        rows.push([dimension, group.key, ...columns.slice(2).map((key) => group.usage?.[key])]);
+        rows.push([
+          dimension,
+          group.key,
+          ...columns.slice(2).map((key) => exportValue(group.usage, key)),
+        ]);
       }
     }
     for (const [key, value] of Object.entries(snapshot.filters ?? {})) {
@@ -97,7 +108,14 @@
       ['metadata', 'captured_at', snapshot.captured_at],
       ['metadata', 'pricing', JSON.stringify(report.pricing ?? {})],
     );
-    const blob = new Blob(['\uFEFF' + rows.map((row) => row.map(csvCell).join(',')).join('\r\n')], {
+    return rows.map((row) => row.map(csvCell).join(',')).join('\r\n');
+  }
+
+  function exportCSV() {
+    if (!snapshot) {
+      return;
+    }
+    const blob = new Blob(['\uFEFF' + buildCSV(exportSnapshot(snapshot))], {
       type: 'text/csv;charset=utf-8',
     });
     download(blob, 'csv');
@@ -107,15 +125,18 @@
     if (!snapshot) {
       return;
     }
-    const data = {
-      ...snapshot,
-      exported_at: new Date().toISOString(),
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    };
-    const blob = new Blob([JSON.stringify(data, null, 2)], {
+    const blob = new Blob([JSON.stringify(exportSnapshot(snapshot), null, 2)], {
       type: 'application/json;charset=utf-8',
     });
     download(blob, 'json');
+  }
+
+  function exportSnapshot(value) {
+    return {
+      ...value,
+      exported_at: new Date().toISOString(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    };
   }
 
   function download(blob, format) {
@@ -146,7 +167,11 @@
       } else {
         params.set('view', key);
       }
-      history.replaceState(null, '', params.toString() ? `?${params.toString()}` : window.location.pathname);
+      history.replaceState(
+        null,
+        '',
+        params.toString() ? `?${params.toString()}` : window.location.pathname,
+      );
     }
   }
 
@@ -235,8 +260,21 @@
     }
     const exportButton = document.querySelector('#shell-export');
     if (exportButton) {
-      exportButton.addEventListener('click', () => {
-        exportCSV();
+      for (const [id, action] of [
+        ['#shell-export-csv', exportCSV],
+        ['#shell-export-json', exportJSON],
+      ]) {
+        document.querySelector(id)?.addEventListener('click', () => {
+          action();
+          exportButton.open = false;
+        });
+      }
+      exportButton.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && exportButton.open) {
+          event.preventDefault();
+          exportButton.open = false;
+          exportButton.querySelector('summary')?.focus();
+        }
       });
       exportButton.title = t('Exports use the last successful filtered report and exact numbers.');
     }
@@ -247,7 +285,9 @@
           version: 1,
           rows: [
             {
-              request_id: 'req-001',
+              id: 'req-001',
+              session: 'session-001',
+              completed_at_ms: 1793318400000,
               model: 'grok-4',
               status: 'completed',
               fresh_input_tokens: 1204,
@@ -257,10 +297,10 @@
             },
           ],
         };
-        const line = document.querySelector('#import-state-line');
+        const line = document.querySelector('#grok-format-output');
         if (line) {
-          line.textContent = t('Format example') + ': ' + JSON.stringify(example);
-          line.className = 'import-state-ok';
+          line.textContent = JSON.stringify(example, null, 2);
+          line.hidden = false;
         }
       });
     }
@@ -277,7 +317,9 @@
       silent: by('silent'),
       inactive: by('inactive'),
       notInstrumented: by('not_instrumented'),
-      warnings: number(coverageData?.warnings?.length ?? currentReport?.native?.warnings?.length ?? 0),
+      warnings: number(
+        coverageData?.warnings?.length ?? currentReport?.native?.warnings?.length ?? 0,
+      ),
     };
   }
 
@@ -294,17 +336,17 @@
     const values = metrics(totals);
     const pricing = currentReport.pricing ?? {};
     const unpriced = pricing.unpriced?.length ?? 0;
-    const eventsWithUsage = number(currentReport.events_with_usage);
-    const pricedShare =
-      eventsWithUsage > 0 && totals.unpriced_events !== undefined
-        ? Math.max(0, 1 - number(totals.unpriced_events) / eventsWithUsage)
-        : null;
+    const estimate = window.BeaconAgentView?.estimateDetails(totals) ?? null;
     const counts = coverageCounts();
     const chips = [
       counts.covered ? stateChip('ok', `${t('Usage received')} ${counts.covered}`) : '',
-      counts.silent ? stateChip('activity', `${t('Activity without expected usage')} ${counts.silent}`) : '',
+      counts.silent
+        ? stateChip('activity', `${t('Activity without expected usage')} ${counts.silent}`)
+        : '',
       counts.inactive ? stateChip('muted', `${t('No activity in range')} ${counts.inactive}`) : '',
-      counts.notInstrumented ? stateChip('muted', `${t('No token capture path')} ${counts.notInstrumented}`) : '',
+      counts.notInstrumented
+        ? stateChip('muted', `${t('No token capture path')} ${counts.notInstrumented}`)
+        : '',
       counts.warnings ? stateChip('warn', `${t('Read failures')} ${counts.warnings}`) : '',
     ];
     const cards = [
@@ -316,29 +358,29 @@
       },
       {
         label: `${t('Priced cost estimate')} <span class="granularity-chip task">${window.escapeHTML(t('estimate'))}</span>`,
-        value:
-          totals.estimated_cost_usd > 0
-            ? `$${totals.estimated_cost_usd.toFixed(2)}`
-            : t('Unknown'),
+        value: estimate ? `$${estimate.value.toFixed(2)}` : t('Unknown'),
+        title: estimate ? String(estimate.value) : '',
         hint:
           (unpriced
             ? `${window.escapeHTML(t('{count} models without list price', { count: unpriced }))} · `
-            : '') +
-          window.escapeHTML(t('Unknown is not free')) +
-          (pricedShare !== null
-            ? ` · ${window.escapeHTML(t('covers {percent} of captured usage', { percent: Math.round(pricedShare * 100) + '%' }))}`
-            : ''),
+            : '') + window.escapeHTML(t('Unknown is not free')),
       },
       {
         label: t('Cache read share'),
-        value: values.cacheReadShare === null ? t('Unknown') : `${(values.cacheReadShare * 100).toFixed(1)}%`,
+        value:
+          values.cacheReadShare === null
+            ? t('Unknown')
+            : `${(values.cacheReadShare * 100).toFixed(1)}%`,
         hint: `${window.escapeHTML(t('Read'))} ${window.escapeHTML(window.formatTokens(values.read))} · ${window.escapeHTML(t('Write'))} ${window.escapeHTML(window.formatTokens(values.write))}`,
       },
       {
         label: t('Collection status summary'),
         status: true,
-        count: `${counts.covered}<small>/ ${counts.total} ${window.escapeHTML(t('sources'))}</small>`,
-        hint: `<span class="kpi-chip-row">${chips.filter(Boolean).join('') || stateChip('muted', t('No runtime evidence in this range'))}</span>`,
+        count:
+          coverageState !== 'ready'
+            ? window.escapeHTML(t(coverageState === 'pending' ? 'Loading' : 'Unknown'))
+            : `${counts.covered}<small>/ ${counts.total} ${window.escapeHTML(t('sources'))}</small>`,
+        hint: `<span class="kpi-chip-row">${coverageState === 'pending' ? stateChip('muted', t('Loading collection status...')) : coverageState === 'failed' ? stateChip('warn', t('Coverage unavailable')) : chips.filter(Boolean).join('') || stateChip('muted', t('No runtime evidence in this range'))}</span>`,
       },
     ];
     el.innerHTML = cards
@@ -374,6 +416,7 @@
     for (let index = 0; index < rows.length; index += factor) {
       const chunk = rows.slice(index, index + factor);
       const row = { ...chunk[0] };
+      row.lastStart = chunk.at(-1).start;
       for (const part of chunk.slice(1)) {
         for (const key of Object.keys(part)) {
           if (key !== 'start' && typeof part[key] === 'number') {
@@ -409,7 +452,16 @@
     return { rows: merged.rows, note: merged.note };
   }
 
-  const agentPalette = ['#2f6f62', '#4e8fc7', '#8a6fc8', '#d9a441', '#c4703f', '#b3577f', '#7fb069', '#9aa8a0'];
+  const agentPalette = [
+    '#2f6f62',
+    '#4e8fc7',
+    '#8a6fc8',
+    '#d9a441',
+    '#c4703f',
+    '#b3577f',
+    '#7fb069',
+    '#9aa8a0',
+  ];
 
   function stackedTrendSvg(rows, seriesKeys, colorFor) {
     const el = document.querySelector('#token-trend');
@@ -420,6 +472,7 @@
     const legendItems = seriesKeys
       .map(([, , label]) => `<span><i class="dot"></i>${window.escapeHTML(label)}</span>`)
       .join('');
+    renderTrendTable(rows, seriesKeys);
     if (!rows.length) {
       legend.innerHTML = legendItems;
       el.innerHTML = `<p class="muted section-pad">${window.escapeHTML(t('No token throughput captured yet.'))}</p>`;
@@ -447,6 +500,8 @@
         cursor -= sized;
         bars += `<rect class="trend-bar" x="${x.toFixed(1)}" y="${cursor.toFixed(1)}" width="${barWidth.toFixed(1)}" height="${sized.toFixed(1)}" fill="${colorFor(key)}"><title>${window.escapeHTML(row.label)} · ${window.escapeHTML(row.titles[key])}</title></rect>`;
       }
+      const detail = seriesKeys.map(([key]) => row.titles[key]).join(' · ');
+      bars += `<rect class="trend-hit" data-trend-index="${index}" role="button" tabindex="0" aria-label="${window.escapeHTML(`${t('View time range details')}: ${row.label} · ${detail}`)}" x="${x.toFixed(1)}" y="${padTop}" width="${barWidth.toFixed(1)}" height="${height - padBottom - padTop}" fill="transparent"><title>${window.escapeHTML(`${row.label} · ${detail}`)}</title></rect>`;
     });
     let grid = '';
     for (let i = 0; i <= 3; i += 1) {
@@ -464,7 +519,17 @@
       const x = padLeft + index * slot + slot / 2;
       labels += `<text x="${x.toFixed(1)}" y="${height - 8}" text-anchor="middle" font-size="9" fill="var(--muted)">${window.escapeHTML(row.label)}</text>`;
     });
-    el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${window.escapeHTML(t('Token trend'))}">${grid}${bars}${labels}</svg>`;
+    el.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="group" aria-label="${window.escapeHTML(t('Token trend'))}">${grid}${bars}${labels}</svg>`;
+    el.querySelectorAll('[data-trend-index]').forEach((item) => {
+      const activate = () => openTrendRange(rows[Number(item.dataset.trendIndex)]);
+      item.addEventListener('click', activate);
+      item.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          activate();
+        }
+      });
+    });
     legend.innerHTML = legendItems;
     // Legend swatches share the bar palette through the CSSOM (single source of truth),
     // so a stale cached stylesheet can never desynchronize legend from bars.
@@ -474,6 +539,63 @@
         legendDots[index].style.background = color;
       }
     });
+  }
+
+  function trendFilterRange(row, filters) {
+    const first = Date.parse(row.start);
+    const last = Date.parse(row.lastStart ?? row.start);
+    const bucketMs = filters?.bucket === '24h' ? 86400000 : filters?.bucket === '1h' ? 3600000 : 0;
+    if (!Number.isFinite(first) || !Number.isFinite(last) || !bucketMs || last < first) return null;
+    const endExclusive = last + bucketMs;
+    const originalSince = Date.parse(filters?.since);
+    const originalUntil = Date.parse(filters?.until);
+    const since =
+      Number.isFinite(originalSince) && originalSince >= first
+        ? filters.since
+        : new Date(first).toISOString();
+    const until =
+      Number.isFinite(originalUntil) && originalUntil < endExclusive
+        ? filters.until
+        : new Date(endExclusive - 1000).toISOString().replace('.000Z', '.999999999Z');
+    return Date.parse(since) <= Date.parse(until) ? { since, until } : null;
+  }
+
+  function openTrendRange(row) {
+    const range = trendFilterRange(row, snapshot?.filters);
+    if (!range) return;
+    const params = new URLSearchParams(window.location.search);
+    params.set('range', 'custom');
+    params.set('since', range.since);
+    params.set('until', range.until);
+    params.set('view', 'details');
+    window.location.search = params.toString();
+  }
+
+  function renderTrendTable(rows, seriesKeys) {
+    const table = document.querySelector('#token-trend-table');
+    if (!table) return;
+    if (!rows.length) {
+      table.innerHTML = `<p class="muted">${window.escapeHTML(t('No token throughput captured yet.'))}</p>`;
+      return;
+    }
+    table.innerHTML = `<table><thead><tr><th>${window.escapeHTML(t('Trend bucket'))}</th><th>${window.escapeHTML(t('Token details'))}</th><th>${window.escapeHTML(t('Total Tokens'))}</th><th>${window.escapeHTML(t('View time range details'))}</th></tr></thead><tbody>${rows.map((row, index) => `<tr><td>${window.escapeHTML(row.label)}</td><td>${seriesKeys.map(([key]) => window.escapeHTML(row.titles[key])).join(' · ')}</td><td>${window.escapeHTML(window.formatExactTokens(row.total))}</td><td><button type="button" data-trend-row="${index}">${window.escapeHTML(t('View time range details'))}</button></td></tr>`).join('')}</tbody></table>`;
+    table.querySelectorAll('[data-trend-row]').forEach((button) => {
+      button.addEventListener('click', () => openTrendRange(rows[Number(button.dataset.trendRow)]));
+    });
+  }
+
+  function trendLabel(row) {
+    const format = (value) =>
+      new Date(value).toLocaleString([], {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    const first = format(row.start);
+    const bucketMs = snapshot?.filters?.bucket === '24h' ? 86400000 : 3600000;
+    const end = Date.parse(row.lastStart ?? row.start) + bucketMs;
+    return Number.isFinite(end) ? `${first} – ${format(end)}` : first;
   }
 
   function agentTrendRows() {
@@ -514,14 +636,16 @@
         row[key] =
           key === '__other__'
             ? rest.reduce((sum, name) => sum + (bucket[name] ?? 0), 0)
-            : bucket[key] ?? 0;
+            : (bucket[key] ?? 0);
       }
       return row;
     });
     const merged = mergeBuckets(raw, MAX_TREND_BUCKETS);
     const rows = merged.rows.map((row) => {
       const display = {
-        label: new Date(row.start).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
+        start: row.start,
+        lastStart: row.lastStart ?? row.start,
+        label: trendLabel(row),
         total: 0,
         titles: {},
       };
@@ -545,12 +669,14 @@
     if (trendMode === 'agent') {
       const agent = agentTrendRows();
       stackedTrendSvg(agent.rows, agent.seriesKeys, agent.colorOf);
-      setTrendNote(agent.note);
+      setTrendNote([agent.note, t('Time bucket end is exclusive.')].filter(Boolean).join(' · '));
       return;
     }
     const { rows, note: mergedNote } = trendRows();
     const componentRows = rows.map((row) => ({
-      label: new Date(row.start).toLocaleString([], { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
+      start: row.start,
+      lastStart: row.lastStart ?? row.start,
+      label: trendLabel(row),
       fresh: row.fresh,
       read: row.read,
       write: row.write,
@@ -565,9 +691,7 @@
     }));
     const series = [
       ['fresh', palette.fresh, t('Fresh input')],
-      ...(trendExcludeRead
-        ? []
-        : [['read', palette.read, t('Cache read')]]),
+      ...(trendExcludeRead ? [] : [['read', palette.read, t('Cache read')]]),
       ['write', palette.write, t('Cache write')],
       ['output', palette.output, t('Output')],
     ];
@@ -581,11 +705,12 @@
     setTrendNote(
       [
         trendExcludeRead
-          ? t('This view excludes cache read; hover a segment for exact values.')
+          ? t('This view excludes cache read; detail totals include all components.')
           : trendScale === 'share'
             ? t('Each bar is normalized to 100% of its bucket.')
             : '',
         mergedNote,
+        t('Time bucket end is exclusive.'),
       ]
         .filter(Boolean)
         .join(' · '),
@@ -638,7 +763,13 @@
       (sum, row) => sum + window.BeaconAgentView.total(row.usage ?? {}),
       0,
     );
-    const rows = (window.BeaconAgentView.agentNames(currentReport, coverageData ?? { runtimes: [] }, currentStatus) ?? [])
+    const rows = (
+      window.BeaconAgentView.agentNames(
+        currentReport,
+        coverageData ?? { runtimes: [] },
+        currentStatus,
+      ) ?? []
+    )
       .map((name) => ({
         name,
         usage: currentReport.by_harness?.find((row) => row.key === name)?.usage,
@@ -646,13 +777,23 @@
         coverageStatus: coverageData?.runtimes?.find((row) => row.harness === name)?.status,
       }))
       .map((row) => ({ ...row, total: row.usage ? window.BeaconAgentView.total(row.usage) : null }))
-      .sort((a, b) => (b.total ?? -1) - (a.total ?? -1) || window.harnessLabel(a.name).localeCompare(window.harnessLabel(b.name)));
+      .sort(
+        (a, b) =>
+          (b.total ?? -1) - (a.total ?? -1) ||
+          window.harnessLabel(a.name).localeCompare(window.harnessLabel(b.name)),
+      );
     const scope = document.querySelector('#token-rank-scope');
     if (scope) {
       scope.textContent = `${rows.length} ${t('sources')}`;
     }
     if (!rows.length) {
-      el.innerHTML = `<p class="muted">${window.escapeHTML(t('No runtime evidence in this range'))}</p>`;
+      const message =
+        coverageState === 'pending'
+          ? 'Loading collection status...'
+          : coverageState === 'failed'
+            ? 'Coverage unavailable'
+            : 'No runtime evidence in this range';
+      el.innerHTML = `<p class="muted">${window.escapeHTML(t(message))}</p>`;
       return;
     }
     el.innerHTML = `<table class="rank-table"><thead><tr><th>${window.escapeHTML(t('Agent'))}</th><th>${window.escapeHTML(t('Captured tokens'))}</th><th>${window.escapeHTML(t('Share'))}</th><th>${window.escapeHTML(t('Status'))}</th></tr></thead><tbody>${rows
@@ -821,7 +962,6 @@
     });
   }
 
-
   /* ---- Model usage bars (per-model stacked components) ---- */
 
   function renderModelBars() {
@@ -879,11 +1019,17 @@
       return;
     }
     const items = [
-      t('Total = fresh input + cache read + cache write + output. Reasoning is included in output; do not add it again.'),
-      t('Cache read share is a token proportion, not a request hit rate. Averages use usage events, not necessarily API calls.'),
+      t(
+        'Total = fresh input + cache read + cache write + output. Reasoning is included in output; do not add it again.',
+      ),
+      t(
+        'Cache read share is a token proportion, not a request hit rate. Averages use usage events, not necessarily API calls.',
+      ),
       t('Estimates are list prices, not invoices; unknown costs remain unknown.'),
       t('Coverage uses the time and Agent filters only; it does not prove billing completeness.'),
-      t('Inventory detection is separate from observed activity and may not detect native snapshots.'),
+      t(
+        'Inventory detection is separate from observed activity and may not detect native snapshots.',
+      ),
       currentReport.native?.warnings?.length
         ? `${t('Native source warnings')}: ${currentReport.native.warnings.join(' · ')}`
         : '',
@@ -951,7 +1097,22 @@
   }
 
   function coverage(value) {
+    coverageState = 'ready';
     coverageData = value;
+    renderKpis();
+    renderRank();
+  }
+
+  function coverageUnavailable() {
+    coverageState = 'failed';
+    coverageData = null;
+    renderKpis();
+    renderRank();
+  }
+
+  function coveragePending() {
+    coverageState = 'pending';
+    coverageData = null;
     renderKpis();
     renderRank();
   }
@@ -968,9 +1129,14 @@
     setupViews,
     update,
     coverage,
+    coveragePending,
+    coverageUnavailable,
     stale,
     metrics,
     csvCell,
+    trendFilterRange,
+    buildCSV,
+    exportSnapshot,
     exportCSV,
     exportJSON,
     buildSnapshot,

@@ -14,7 +14,9 @@ const state = {
   lastDetectionHashScroll: "",
   findings: [],
   findingsRules: null,
+  findingsRulesError: null,
   findingsSessions: new Map(),
+  findingsSessionErrors: new Map(),
   findingsExpanded: new Set(),
   inventoryView: "configs",
   inventoryRuntime: "",
@@ -226,9 +228,11 @@ function ensureLimitOption(select, value) {
 
 function updateURL(query) {
   const params = new URLSearchParams(query);
+  const language = new URLSearchParams(window.location.search).get("lang");
+  if (language) params.set("lang", language);
   const range = $("#range-filter");
   if (range) {
-    if (range.value && range.value !== "30d") {
+    if (range.value) {
       params.set("range", range.value);
     } else {
       params.delete("range");
@@ -248,8 +252,9 @@ async function load({ updateLocation = false, mode = "replace" } = {}) {
   if (mode === "poll" && activityLoadInFlight) return;
   const generation = ++activityLoadGeneration;
   activityLoadInFlight = true;
+  if (isSessionsPage) syncSinceFromRange();
   const query = queryFromFilters();
-  if (updateLocation) updateURL(query);
+  if (updateLocation || (isSessionsPage && mode === "poll")) updateURL(query);
   const suffix = query ? `?${query}` : "";
   const activityPath = isSessionsPage || isOverviewPage ? "/api/sessions" : "/api/events";
   const quiet = mode === "poll";
@@ -300,6 +305,24 @@ function render() {
 let overviewBucket = "24h";
 
 function renderOverviewPage() {
+  const notice = $("#overview-notice");
+  if (notice) {
+    let message = "";
+    if (state.error) {
+      message = t(state.summary ? "Refresh failed; showing the last successful activity data: {error}" : "Activity data could not be loaded: {error}", { error: state.error.message });
+    } else if (state.sessionResult?.truncated) {
+      message = t("Session charts use the latest {shown} of {total} sessions; results may be incomplete.", { shown: state.sessionResult.returned, total: state.sessionResult.total_sessions });
+    }
+    notice.hidden = !message;
+    notice.textContent = message;
+  }
+  if (!state.summary) {
+    for (const selector of ["#overview-kpis", "#overview-hourly", "#overview-hourly-table", "#overview-sources", "#overview-attention"]) {
+      const element = $(selector);
+      if (element) element.replaceChildren();
+    }
+    return;
+  }
   const summary = state.summary ?? {};
   const sessions = state.sessionResult?.sessions ?? [];
   renderOverviewKpis(summary);
@@ -309,14 +332,19 @@ function renderOverviewPage() {
   loadRemoteSources().catch(console.error);
 }
 
+let remoteSourcesGeneration = 0;
+
 async function loadRemoteSources() {
   const listEl = $("#remote-cards");
   if (!listEl) return;
+  const generation = ++remoteSourcesGeneration;
   let sources = [];
   try {
     const resp = await getJSON("/api/remote-sources");
+    if (generation !== remoteSourcesGeneration) return;
     sources = resp?.sources ?? [];
   } catch (error) {
+    if (generation !== remoteSourcesGeneration) return;
     listEl.innerHTML = `<p class="muted">${escapeHTML(String(error.message || error))}</p>`;
     return;
   }
@@ -330,11 +358,27 @@ async function loadRemoteSources() {
         `<div class="remote-card" id="remote-${escapeHTML(source.id)}"><div class="remote-title"><strong>${escapeHTML(source.name)}</strong><span class="muted">${escapeHTML(source.url)}</span></div><div class="remote-kpi muted" data-remote-kpi="${escapeHTML(source.id)}">${escapeHTML(t("Checking..."))}</div><button type="button" class="btn-secondary" data-remote-remove="${escapeHTML(source.id)}">${escapeHTML(t("Remove"))}</button></div>`,
     )
     .join("");
-  for (const source of sources) {
-    const kpiEl = listEl.querySelector(`[data-remote-kpi="${source.id}"]`);
-    if (!kpiEl) continue;
+  for (const button of listEl.querySelectorAll("[data-remote-remove]")) {
+    button.addEventListener("click", async () => {
+      const feedback = $("#remote-feedback");
+      button.disabled = true;
+      try {
+        await deleteRemoteSource(button.dataset.remoteRemove);
+        window.clearDataCache("/api/remote-sources");
+        if (feedback) feedback.textContent = t("Source removed");
+        await loadRemoteSources();
+      } catch (error) {
+        if (feedback) feedback.textContent = t("Failed to remove source: {error}", { error: error.message });
+        button.disabled = false;
+      }
+    });
+  }
+  await Promise.all(sources.map(async (source) => {
+    const kpiEl = [...listEl.querySelectorAll("[data-remote-kpi]")].find((el) => el.dataset.remoteKpi === source.id);
+    if (!kpiEl) return;
     try {
-      const summary = await getJSON(`/api/remote-sources/${source.id}/summary`);
+      const summary = await getJSON(`/api/remote-sources/${encodeURIComponent(source.id)}/summary`);
+      if (generation !== remoteSourcesGeneration) return;
       kpiEl.innerHTML =
         `<span class="state-pill ok">${escapeHTML(t("Online"))}</span> ` +
         escapeHTML(
@@ -345,27 +389,28 @@ async function loadRemoteSources() {
           }),
         );
     } catch (error) {
+      if (generation !== remoteSourcesGeneration) return;
       kpiEl.innerHTML = `<span class="state-pill danger">${escapeHTML(t("Unreachable"))}</span> ${escapeHTML(String(error.message || error))}`;
     }
-  }
-  for (const button of listEl.querySelectorAll("[data-remote-remove]")) {
-    button.addEventListener("click", async () => {
-      await fetch(`/api/remote-sources/${button.dataset.remoteRemove}`, { method: "DELETE" });
-      window.clearDataCache("/api/remote-sources");
-      loadRemoteSources().catch(console.error);
-    });
+  }));
+}
+
+async function deleteRemoteSource(id) {
+  const response = await fetch(`/api/remote-sources/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || String(response.status));
   }
 }
 
 function renderOverviewKpis(summary) {
   const el = $("#overview-kpis");
   if (!el) return;
-  const writes = summary.file_events || 0;
   const cards = [
     { label: t("Active sessions"), value: String(summary.active_sessions ?? 0), hint: t("sessions seen in the log") },
     { label: t("Events"), value: Number(summary.total_events ?? 0).toLocaleString(), hint: t("matching current view") },
     { label: t("Tool calls"), value: Number(summary.tool_events ?? 0).toLocaleString(), hint: t("tool.invoked events") },
-    { label: t("Commands and writes"), value: Number((summary.command_events ?? 0) + writes).toLocaleString(), hint: t("commands {n} / writes {m}", { n: summary.command_events ?? 0, m: writes }) },
+    { label: t("Commands / file events"), value: `${Number(summary.command_events ?? 0).toLocaleString()} / ${Number(summary.file_events ?? 0).toLocaleString()}`, hint: t("Categories may overlap; file events include more than writes.") },
   ];
   el.innerHTML = cards
     .map(
@@ -375,25 +420,35 @@ function renderOverviewKpis(summary) {
     .join("");
 }
 
-function renderOverviewHourly(sessions) {
-  const el = $("#overview-hourly");
-  if (!el) return;
-  const now = Date.now();
-  const slots = overviewBucket === "24h" ? 24 : 7;
-  const windowMs = windowMsOf(slots);
-  const width = windowMs / slots;
+function overviewSessionBuckets(sessions, bucket, now = Date.now()) {
+  const hourly = bucket === "24h";
+  const slots = hourly ? 24 : 7;
   const buckets = new Map();
+  const currentDay = new Date(now);
+  currentDay.setHours(0, 0, 0, 0);
   for (let i = 0; i < slots; i += 1) {
-    buckets.set(Math.floor((now - i * width) / width) * width, 0);
+    const day = new Date(currentDay);
+    day.setDate(day.getDate() - i);
+    buckets.set(hourly ? Math.floor(now / 3600000) * 3600000 - i * 3600000 : day.getTime(), 0);
   }
   let covered = 0;
   for (const session of sessions) {
     const stamp = Date.parse(session.last_event_at);
-    if (!Number.isFinite(stamp) || stamp < now - windowMs) continue;
-    const slotStart = Math.floor(stamp / width) * width;
-    buckets.set(slotStart, (buckets.get(slotStart) ?? 0) + 1);
+    if (!Number.isFinite(stamp) || stamp > now) continue;
+    const day = new Date(stamp);
+    day.setHours(0, 0, 0, 0);
+    const slotStart = hourly ? Math.floor(stamp / 3600000) * 3600000 : day.getTime();
+    if (!buckets.has(slotStart)) continue;
+    buckets.set(slotStart, buckets.get(slotStart) + 1);
     covered += 1;
   }
+  return { buckets, covered };
+}
+
+function renderOverviewHourly(sessions) {
+  const el = $("#overview-hourly");
+  if (!el) return;
+  const { buckets, covered } = overviewSessionBuckets(sessions, overviewBucket);
   const starts = [...buckets.keys()].sort((a, b) => a - b);
   const max = Math.max(...starts.map((slot) => buckets.get(slot) ?? 0), 1);
   const label = (slot) =>
@@ -413,14 +468,14 @@ function renderOverviewHourly(sessions) {
   el.querySelectorAll(".hour-bar").forEach((bar) => {
     bar.style.height = `${bar.dataset.height}%`;
   });
+  const table = $("#overview-hourly-table");
+  if (table) {
+    table.innerHTML = starts.map((slot) => `<tr><td>${escapeHTML(label(slot))}</td><td>${escapeHTML(String(buckets.get(slot) ?? 0))}</td></tr>`).join("");
+  }
   const note = $("#overview-hourly-note");
   if (note) {
     note.textContent = t("Based on each session's latest activity time ({count} sessions).", { count: covered });
   }
-}
-
-function windowMsOf(slots) {
-  return slots === 24 ? 24 * 3600000 : 7 * 86400000;
 }
 
 function renderOverviewSources(sessions, summary) {
@@ -639,10 +694,10 @@ function renderSearchState() {
     notice.textContent = t("Failed to load dashboard: {error}", { error: state.error.message });
   } else if (result.truncated) {
     notice.hidden = false;
-    notice.textContent = `Showing the latest ${returned} matching ${unit}${returned === 1 ? "" : "s"}. Narrow the search or raise the limit to see more.`;
+    notice.textContent = t(isSessionsPage ? "Showing {shown} of {total} matching sessions; narrow the filters to see the rest." : "Showing {shown} of {total} matching events; narrow the filters to see the rest.", { shown: returned, total });
   } else if (result.malformed_lines) {
     notice.hidden = false;
-    notice.textContent = `${result.malformed_lines} malformed log line${result.malformed_lines === 1 ? "" : "s"} skipped.`;
+    notice.textContent = t("{count} malformed log lines were skipped.", { count: result.malformed_lines });
   } else {
     notice.hidden = true;
     notice.textContent = "";
@@ -662,6 +717,15 @@ function renderSearchState() {
 
 async function loadSessionPage() {
   const params = new URLSearchParams(window.location.search);
+  const backURL = safeSessionReturnURL(params.get("return"), window.location.origin);
+  if (backURL) $$(".session-back-link").forEach((link) => {
+    link.href = backURL;
+    if (new URL(backURL, window.location.origin).pathname === "/tokens.html") {
+      const label = link.querySelector("[data-i18n]") || link;
+      label.dataset.i18n = "Back to token usage";
+      label.textContent = t("Back to token usage");
+    }
+  });
   const id = (params.get("id") || "").trim();
   if (!id) {
     state.error = new Error("session id is required");
@@ -688,11 +752,21 @@ async function loadSessionPage() {
   }
 }
 
+function safeSessionReturnURL(returnPath, origin) {
+  if (typeof returnPath !== "string" || !returnPath.startsWith("/") || returnPath.startsWith("//")) return null;
+  try {
+    const target = new URL(returnPath, origin);
+    return target.origin === origin && ["/", "/tokens.html"].includes(target.pathname) ? `${target.pathname}${target.search}${target.hash}` : null;
+  } catch {
+    return null;
+  }
+}
+
 function renderSessionPage() {
   setText("#log-path", state.status?.log_path || t("Runtime log unavailable"));
   const detail = state.sessionDetail || {};
   if (state.error && !state.sessionDetail) {
-    setSessionDetailViewState("error", `Failed to load session: ${state.error.message}`);
+    setSessionDetailViewState("error", t("Failed to load session: {error}", { error: t(state.error.message) }));
     return;
   }
   renderSessionOverview(detail);
@@ -701,7 +775,7 @@ function renderSessionPage() {
   setSessionDetailViewState("ready");
   if ($("#notice")) {
     $("#notice").hidden = !state.error;
-    $("#notice").textContent = state.error ? `Unable to refresh session: ${state.error.message}` : "";
+    $("#notice").textContent = state.error ? t("Unable to refresh session: {error}", { error: t(state.error.message) }) : "";
   }
 }
 
@@ -712,6 +786,8 @@ function setSessionDetailViewState(mode, message = "") {
   if (!status) return;
   status.hidden = mode === "ready";
   status.classList.toggle("error", mode === "error");
+  const actions = $("#session-detail-error-actions");
+  if (actions) actions.hidden = mode !== "error";
   setText(
     "#session-detail-status-message",
     message || (mode === "loading" ? t("Loading session details...") : ""),
@@ -757,8 +833,8 @@ function renderSessionEventFilters() {
   const actionFilters = $("#session-action-filters");
   if (actionFilters) {
     actionFilters.innerHTML = `
-      <button type="button" class="${filters.destructive ? "" : "active"}" data-session-destructive="false">${escapeHTML(t("All actions"))}</button>
-      <button type="button" class="${filters.destructive ? "active" : ""}" data-session-destructive="true">${escapeHTML(t("Contains destructive action"))}</button>
+      <button type="button" aria-pressed="${!filters.destructive}" class="${filters.destructive ? "" : "active"}" data-session-destructive="false">${escapeHTML(t("All actions"))}</button>
+      <button type="button" aria-pressed="${filters.destructive}" class="${filters.destructive ? "active" : ""}" data-session-destructive="true">${escapeHTML(t("Contains destructive action"))}</button>
     `;
   }
   $$("[data-session-event-type]").forEach((button) => {
@@ -786,6 +862,7 @@ function renderSessionEventFilters() {
   if (internal) {
     internal.textContent = filters.showInternal ? t("Hide internal events") : t("Show internal events");
     internal.classList.toggle("active", filters.showInternal);
+    internal.setAttribute("aria-pressed", String(filters.showInternal));
     internal.onclick = () => {
       filters.showInternal = !filters.showInternal;
       renderSessionEventFilters();
@@ -799,7 +876,7 @@ function renderSessionFilterButtons(selector, options, current, dataName) {
   if (!container) return;
   const attribute = dataName.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
   container.innerHTML = options.map(([value, label]) => `
-    <button type="button" class="${current === value ? "active" : ""}" data-${attribute}="${escapeHTML(value)}">${escapeHTML(label)}</button>
+    <button type="button" aria-pressed="${current === value}" class="${current === value ? "active" : ""}" data-${attribute}="${escapeHTML(value)}">${escapeHTML(label)}</button>
   `).join("");
 }
 
@@ -810,9 +887,9 @@ function renderSessionEventTable() {
   const filters = state.sessionEventFilters;
   const typeLabel = sessionTypeOptions.find(([value]) => value === filters.type)?.[1] || t("All types");
   const severityLabel = sessionSeverityOptions.find(([value]) => value === filters.severity)?.[1] || t("All severities");
-  const actionLabel = filters.destructive ? "Destructive" : t("All");
-  const runtimeLabel = filters.showInternal || internalSessionCategories.includes(filters.type) ? "internal shown" : "internal hidden";
-  setText("#result-meta", `Type: ${typeLabel} · Severity: ${severityLabel} · Action: ${actionLabel} · Runtime: ${runtimeLabel} · ${records.length} of ${state.events.length} events`);
+  const actionLabel = filters.destructive ? t("Contains destructive action") : t("All");
+  const runtimeLabel = t(filters.showInternal || internalSessionCategories.includes(filters.type) ? "Internal events shown" : "Internal events hidden");
+  setText("#result-meta", t("Type: {type} · Severity: {severity} · Action: {action} · {internal} · {shown} of {total} events", { type: typeLabel, severity: severityLabel, action: actionLabel, internal: runtimeLabel, shown: records.length, total: state.events.length }));
   if (!records.length) {
     tbody.innerHTML = `<tr><td colspan="11" class="muted">${escapeHTML(t("No events match these filters."))}</td></tr>`;
     return;
@@ -1014,7 +1091,7 @@ async function loadInventory() {
     renderInventory(inventory);
   } catch (err) {
     state.error = err;
-    setText("#inventory-meta", `Failed to load inventory: ${err.message}`);
+    setText("#inventory-meta", t(state.inventory ? "Inventory refresh failed; showing the last successful scan: {error}" : "Inventory could not be loaded: {error}", { error: err.message }));
   }
 }
 
@@ -1144,9 +1221,22 @@ function updateInventoryURL() {
 
 function renderInventoryWorkspace(_resp, ctx) {
   if (!$("#inventory-workspace")) return;
+  renderInventorySummary(ctx);
   renderInventoryFilterOptions(ctx);
   renderInventoryViewTabs(ctx);
   renderInventoryActiveTable(ctx);
+}
+
+function renderInventorySummary(ctx) {
+  const el = $("#inventory-summary");
+  if (!el) return;
+  const cards = [
+    [t("Detected runtimes"), (ctx.harnesses || []).filter((row) => row.detected).length],
+    [t("Discovered config files"), (ctx.existingConfigs || []).length],
+    [t("Discovered MCP servers"), (ctx.servers || []).length],
+    [t("Discovered hook targets"), (ctx.hooks || []).length],
+  ];
+  el.innerHTML = cards.map(([label, value]) => `<div class="inventory-summary-card"><span>${escapeHTML(label)}</span><strong>${escapeHTML(String(value))}</strong></div>`).join("");
 }
 
 function inventoryRowsForView(view, ctx) {
@@ -1192,14 +1282,14 @@ function renderInventoryFilterOptions(ctx) {
     userSelect.innerHTML = `
       <option value="">${escapeHTML(t("All users"))}</option>
       <option value="${escapeHTML(identity.user)}"${state.inventoryUser === identity.user ? " selected" : ""}>${escapeHTML(identity.user)}</option>
+      ${state.inventoryUser && state.inventoryUser !== identity.user ? `<option value="${escapeHTML(state.inventoryUser)}" selected>${escapeHTML(state.inventoryUser)}</option>` : ""}
     `;
   }
   if (runtimeSelect) {
     const rows = inventoryRowsForView(state.inventoryView, ctx);
     const runtimes = uniqueSorted(rows.map(inventoryRuntimeValue).filter(Boolean), runtimeLabel);
     if (state.inventoryRuntime && !runtimes.includes(state.inventoryRuntime)) {
-      state.inventoryRuntime = "";
-      updateInventoryURL();
+      runtimes.push(state.inventoryRuntime);
     }
     runtimeSelect.innerHTML = `<option value="">${escapeHTML(t("All runtimes"))}</option>` + runtimes
       .map((value) => `<option value="${escapeHTML(value)}"${state.inventoryRuntime === value ? " selected" : ""}>${escapeHTML(runtimeLabel(value))}</option>`)
@@ -1213,7 +1303,7 @@ function renderInventoryViewTabs(ctx) {
   const counts = inventoryCounts(ctx);
   el.innerHTML = Object.entries(inventoryViewLabels)
     .map(([view, label]) => `
-      <button type="button" class="${state.inventoryView === view ? "active" : ""}" data-inventory-view="${escapeHTML(view)}">
+      <button type="button" aria-pressed="${state.inventoryView === view}" class="${state.inventoryView === view ? "active" : ""}" data-inventory-view="${escapeHTML(view)}">
         ${escapeHTML(label)} (${escapeHTML(counts[view] || 0)})
       </button>
     `)
@@ -1392,7 +1482,7 @@ function inventoryIdentity() {
 }
 
 function titleCasePathBase(path) {
-  const base = String(path || "").split("/").filter(Boolean).pop() || "";
+  const base = String(path || "").split(/[\\/]/).filter(Boolean).pop() || "";
   return base ? base.replace(/[-_.]+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()) : "";
 }
 
@@ -1621,7 +1711,7 @@ function renderHookInventoryCards(hooks, hookConfigs) {
   const managed = hookConfigs.filter((config) => config.beacon_managed).length;
   const cards = [
     { label: t("Hook Targets"), value: hooks.length, hint: t("runtimes probed") },
-    { label: t("Hooks Installed"), value: installed, hint: t("reporting to Beacon") },
+    { label: t("Hooks Installed"), value: installed, hint: t("Adapter detected") },
     { label: t("Hook Manifests"), value: hookConfigs.length, hint: t("discovered files") },
     { label: t("Beacon Cloud"), value: managed, hint: t("managed manifests") },
   ];
@@ -1639,12 +1729,14 @@ function renderHookInventoryCards(hooks, hookConfigs) {
 function renderHookTargets(hooks, configs = []) {
   const tbody = $("#hook-targets");
   if (!tbody) return;
-  if (!hooks.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No hook targets probed."))}</td></tr>`;
+  const rows = filterHookAssets(hooks, $("#hook-search")?.value || "");
+  setText("#hook-target-count", t("{shown} of {total} Hook targets", { shown: rows.length, total: hooks.length }));
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t(hooks.length ? "No Hook assets match this search." : "No hook targets probed."))}</td></tr>`;
     return;
   }
   const configByPath = configsByPath(configs);
-  tbody.innerHTML = hooks
+  tbody.innerHTML = rows
     .map((hook) => {
       const config = configByPath.get(hook.path) || {};
       return `
@@ -1665,11 +1757,13 @@ function renderHookTargets(hooks, configs = []) {
 function renderHookManifests(hookConfigs) {
   const tbody = $("#hook-manifests");
   if (!tbody) return;
-  if (!hookConfigs.length) {
-    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t("No hook configuration manifests discovered."))}</td></tr>`;
+  const rows = filterHookAssets(hookConfigs, $("#hook-search")?.value || "");
+  setText("#hook-manifest-count", t("{shown} of {total} Hook manifests", { shown: rows.length, total: hookConfigs.length }));
+  if (!rows.length) {
+    tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHTML(t(hookConfigs.length ? "No Hook assets match this search." : "No hook configuration manifests discovered."))}</td></tr>`;
     return;
   }
-  tbody.innerHTML = hookConfigs
+  tbody.innerHTML = rows
     .map((config) => `
       <tr>
         <td>${escapeHTML(runtimeLabel(config.runtime))}</td>
@@ -1682,6 +1776,13 @@ function renderHookManifests(hookConfigs) {
       </tr>
     `)
     .join("");
+}
+
+function filterHookAssets(rows, query) {
+  const needle = query.trim().toLocaleLowerCase();
+  if (!needle) return [...rows];
+  return rows.filter((row) => [row.target, row.runtime, row.status, row.path, row.binary_path, row.scope, row.parser_status, row.message]
+    .some((value) => String(value ?? "").toLocaleLowerCase().includes(needle)));
 }
 
 function renderInventoryScope(scope) {
@@ -1820,6 +1921,7 @@ function renderSessions() {
     .map((session) => sessionRowHTML(session))
     .join("");
   bindSessionRows();
+  restoreSessionListScroll();
 }
 
 function sessionRowHTML(session) {
@@ -1897,14 +1999,48 @@ function bindSessionRows(scope = document) {
   const rows = scope.matches?.("tr[data-session-id]") ? [scope] : Array.from(scope.querySelectorAll("tr[data-session-id]"));
   rows.forEach((row) => {
     row.addEventListener("click", (event) => {
-      if (event.defaultPrevented || event.target.closest("a, button, input, select, textarea")) return;
+      if (event.defaultPrevented || event.target.closest("button, input, select, textarea")) return;
+      const link = event.target.closest("a");
+      if (link && !link.classList.contains("cell-link")) return;
+      saveSessionListScroll();
+      if (link) return;
       window.location.href = sessionPageURL(row.dataset.sessionId);
     });
   });
 }
 
+function saveSessionListScroll() {
+  if (!isSessionsPage) return;
+  try {
+    window.sessionStorage.setItem("beacon.session-list-scroll", JSON.stringify({
+      path: `${window.location.pathname}${window.location.search}`,
+      y: window.scrollY,
+    }));
+  } catch (error) {
+    console.warn("Unable to save session list position", error);
+  }
+}
+
+function restoreSessionListScroll() {
+  if (!isSessionsPage) return;
+  try {
+    const raw = window.sessionStorage.getItem("beacon.session-list-scroll");
+    if (!raw) return;
+    window.sessionStorage.removeItem("beacon.session-list-scroll");
+    const saved = JSON.parse(raw);
+    if (saved?.path === `${window.location.pathname}${window.location.search}` && Number.isFinite(saved.y) && saved.y >= 0) {
+      window.requestAnimationFrame(() => window.scrollTo(0, saved.y));
+    }
+  } catch (error) {
+    console.warn("Unable to restore session list position", error);
+  }
+}
+
 function sessionPageURL(id) {
-  return `/session.html?id=${encodeURIComponent(id)}`;
+  const params = new URLSearchParams({ id });
+  if (window.BeaconI18n?.language) params.set("lang", window.BeaconI18n.language);
+  if (isSessionsPage) params.set("return", `${window.location.pathname}${window.location.search}`);
+  return `/session.html?${params.toString()}`;
 }
 
 function closeDrawer() {
@@ -2528,6 +2664,8 @@ function restoreRangeFromURL() {
   const value = params.get("range");
   if (value && Array.from(range.options).some((opt) => opt.value === value)) {
     range.value = value;
+  } else if (params.get("since")) {
+    range.value = "custom";
   }
 }
 
@@ -2535,7 +2673,7 @@ function setupSessionFilters() {
   const form = $("#filters");
   if (!form) return;
   restoreRangeFromURL();
-  syncSinceFromRange({ preserveExisting: true });
+  syncSinceFromRange();
   syncSessionStateTabs();
   $$("[data-session-state]").forEach((button) => {
     button.addEventListener("click", () => {
@@ -2565,11 +2703,11 @@ function syncSessionStateTabs() {
   });
 }
 
-function syncSinceFromRange({ preserveExisting = false } = {}) {
+function syncSinceFromRange() {
   const range = $("#range-filter");
   const since = $("#since-filter");
   if (!range || !since) return;
-  if (preserveExisting && since.value) return;
+  if (range.value === "custom") return;
   const durations = {
     "24h": 24 * 60 * 60 * 1000,
     "7d": 7 * 24 * 60 * 60 * 1000,
@@ -2609,6 +2747,9 @@ function setFilters(filters, { reset = false } = {}) {
     const input = $(`[name="${key}"]`);
     if (input) input.value = value;
   }
+  if (Object.prototype.hasOwnProperty.call(filters, "since") && $("#range-filter")) {
+    $("#range-filter").value = filters.since ? "custom" : "all";
+  }
   if (!Object.prototype.hasOwnProperty.call(filters, "since")) syncSinceFromRange();
   load({ updateLocation: true }).catch(console.error);
 }
@@ -2636,6 +2777,7 @@ function clearFilter(key) {
   if (!$("#filters")) return;
   const input = $(`[name="${key}"]`);
   if (input) input.value = "";
+  if (key === "since" && $("#range-filter")) $("#range-filter").value = "all";
   load({ updateLocation: true }).catch(console.error);
 }
 
@@ -2706,8 +2848,35 @@ function clearSearch() {
   clearFields();
 }
 
+const tokenRangeStorageKey = "beacon.dashboard.tokenRange";
+
+function resolveTokenRange(params, stored) {
+  const ranges = ["today", "7d", "30d", "all", "custom"];
+  const next = new URLSearchParams(params);
+  if (ranges.includes(next.get("range"))) return next;
+  if (next.has("since") || next.has("until")) {
+    next.set("range", "custom");
+    return next;
+  }
+  let saved = null;
+  try { saved = stored ? JSON.parse(stored) : null; } catch { saved = null; }
+  const validCustom = saved?.range === "custom" && Number.isFinite(Date.parse(saved.since)) && Number.isFinite(Date.parse(saved.until)) && Date.parse(saved.since) <= Date.parse(saved.until);
+  const range = ranges.includes(saved?.range) && (saved.range !== "custom" || validCustom) ? saved.range : "7d";
+  next.set("range", range);
+  if (range === "custom") {
+    next.set("since", saved.since);
+    next.set("until", saved.until);
+  }
+  return next;
+}
+
 function setupTokenControls() {
-  const params = new URLSearchParams(window.location.search);
+  let stored = null;
+  try { stored = localStorage.getItem(tokenRangeStorageKey); } catch (error) { console.warn("Unable to read saved token range", error); }
+  const params = resolveTokenRange(new URLSearchParams(window.location.search), stored);
+  if (params.toString() !== new URLSearchParams(window.location.search).toString()) {
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}${window.location.hash}`);
+  }
   const form = $("#token-filter-form");
   if (!form) return;
   for (const key of ["range", "harness", "model"]) {
@@ -2724,13 +2893,19 @@ function setupTokenControls() {
   const pills = $$("#time-pills [data-range]");
   const updatePills = () => {
     const range = form.elements.namedItem("range").value;
-    pills.forEach((pill) => pill.classList.toggle("active", pill.dataset.range === range));
+    pills.forEach((pill) => {
+      const active = pill.dataset.range === range;
+      pill.classList.toggle("active", active);
+      pill.setAttribute("aria-pressed", String(active));
+    });
   };
   for (const pill of pills) {
     pill.addEventListener("click", () => {
       form.elements.namedItem("range").value = pill.dataset.range;
       updatePills();
       updateDates();
+      setText("#token-filter-error", "");
+      if (pill.dataset.range === "custom") return;
       // Users expect the range pills to apply right away; the SWR cache keeps the
       // reload fast and the refresh button still forces a network pass.
       if (typeof form.requestSubmit === "function") {
@@ -2765,25 +2940,35 @@ function setupTokenControls() {
     if (range === "custom") {
       const since = form.elements.namedItem("since").value;
       const until = form.elements.namedItem("until").value;
-      if (!since || !until || new Date(since) > new Date(until)) {
+      const start = Date.parse(since);
+      const end = Date.parse(until);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end) {
         setText("#token-filter-error", t("Choose a valid start and end time"));
         return;
       }
-      next.set("since", new Date(since).toISOString());
-      next.set("until", new Date(until).toISOString());
+      next.set("since", new Date(start).toISOString());
+      next.set("until", new Date(end).toISOString());
     }
-    window.location.search = next.toString();
+    try {
+      localStorage.setItem(tokenRangeStorageKey, JSON.stringify({ range, since: next.get("since"), until: next.get("until") }));
+    } catch (error) { console.warn("Unable to save token range", error); }
+    if (next.toString() === window.location.search.replace(/^\?/, "")) {
+      refreshData(loadTokens).catch(console.error);
+    } else {
+      window.location.search = next.toString();
+    }
   });
   $("#token-reset").addEventListener("click", () => {
     const next = new URLSearchParams();
     if (params.has("lang")) next.set("lang", params.get("lang"));
     if (params.has("view")) next.set("view", params.get("view"));
+    next.set("range", "7d");
+    try { localStorage.removeItem(tokenRangeStorageKey); } catch (error) { console.warn("Unable to clear saved token range", error); }
     window.location.search = next.toString();
   });
-  $("#token-refresh").addEventListener("click", () => refreshData(loadTokens).catch(console.error));
   $("#token-session-search").addEventListener("input", () => window.BeaconAgentView.refresh());
   $("#token-session-sort").addEventListener("change", () => window.BeaconAgentView.refresh());
-  $("#source-stale-retry").addEventListener("click", () => loadTokens().catch(console.error));
+  $("#source-stale-retry").addEventListener("click", () => refreshData(loadTokens).catch(console.error));
 }
 
 let tokenRequestPending = false;
@@ -2817,6 +3002,16 @@ function setScopeChip(params) {
 async function loadTokens() {
   if (tokenRequestPending) return;
   tokenRequestPending = true;
+  window.BeaconTokenInsights.coveragePending();
+  const cards = $("#source-status-cards");
+  if (cards) cards.replaceChildren();
+  const banner = $("#source-stale-banner");
+  if (banner) banner.hidden = false;
+  setText("#source-stale-text", t("Loading collection status..."));
+  setText("#token-coverage", t("Loading collection status..."));
+  setText("#source-count-note", "");
+  const retry = $("#source-stale-retry");
+  if (retry) retry.disabled = true;
   const params = new URLSearchParams(window.location.search);
   const tokenParams = buildTokenQuery(params);
   const session = (params.get("session") || "").trim();
@@ -2847,7 +3042,12 @@ async function loadTokens() {
     }
     window.BeaconTokenInsights.update(report, status, tokenParams, metadataError ? null : tokenMetadataCache, metadataError);
     for (const row of report.native?.sessions || []) tokenSessionMetadata.set(row.id, row);
-    window.BeaconAgentView.update(report, status, Array.from(tokenSessionMetadata.values()));
+    window.BeaconAgentView.coverage({ runtimes: [] });
+    window.BeaconAgentView.update(report, status, Array.from(tokenSessionMetadata.values()), {
+      available: !metadataError,
+      truncated: Boolean(tokenMetadataCache?.truncated),
+      auditIds: metadataError ? [] : tokenMetadataCache.sessions.map((item) => item.id),
+    });
     renderTokensPage(report, session);
     setText("#token-refresh-status", dataFreshnessText(`${t("Updated")}: `));
     const coverageParams = new URLSearchParams(tokenParams);
@@ -2856,15 +3056,27 @@ async function loadTokens() {
       const coverage = await tokenJSON(`/api/tokens/coverage?${coverageParams}`);
       renderTokenCoverage(coverage);
     } catch (err) {
+      window.BeaconAgentView.coverage({ runtimes: [] });
+      window.BeaconTokenInsights.coverageUnavailable();
+      const cards = $("#source-status-cards");
+      if (cards) cards.replaceChildren();
+      const banner = $("#source-stale-banner");
+      if (banner) banner.hidden = false;
+      setText("#source-stale-text", `${t("Coverage unavailable")}: ${err.message}`);
       setText("#token-coverage", `${t("Coverage unavailable")}: ${err.message}`);
     }
   } catch (err) {
     state.error = err;
+    window.BeaconAgentView.coverage({ runtimes: [] });
+    window.BeaconTokenInsights.coverageUnavailable();
+    setText("#source-stale-text", `${t("Coverage unavailable")}: ${err.message}`);
+    setText("#token-coverage", `${t("Coverage unavailable")}: ${err.message}`);
     window.BeaconTokenInsights.stale();
     setText("#token-refresh-status", `${t("Refresh failed; previous data may be stale")}: ${err.message}`);
     setText("#token-meta", `${t("Failed to load token usage")}: ${err.message}`);
   } finally {
     tokenRequestPending = false;
+    if (retry) retry.disabled = false;
   }
 }
 
@@ -2874,6 +3086,10 @@ function buildTokenQuery(params, now = new Date()) {
     if (params.get(key)) query.set(key, params.get(key));
   }
   const range = params.get("range");
+  if (range === "all") {
+    query.delete("since");
+    query.delete("until");
+  }
   if (["today", "7d", "30d"].includes(range)) {
     const since = new Date(now);
     if (range === "today") since.setHours(0, 0, 0, 0);
@@ -2904,7 +3120,7 @@ function renderTokenCoverage(report) {
         latest = meta.last_event_at;
       }
     }
-    return latest ? new Date(latest).toLocaleString() : t("No observation in range");
+    return latest ? new Date(latest).toLocaleString() : t("Unknown");
   };
   const cards = $("#source-status-cards");
   if (cards) {
@@ -2938,7 +3154,7 @@ function renderTokenCoverage(report) {
   if (!el) return;
   el.innerHTML =
     (rows.length
-      ? `<table class="rank-table"><thead><tr><th>${escapeHTML(t("Source"))}</th><th>${escapeHTML(t("Status"))}</th><th>${escapeHTML(t("Record granularity"))}</th><th>${escapeHTML(t("Provided metrics"))}</th><th>${escapeHTML(t("Last successful observation"))}</th><th>${escapeHTML(t("Read warnings and limits"))}</th><th>${escapeHTML(t("Actions"))}</th></tr></thead><tbody>${rows
+      ? `<table class="rank-table"><thead><tr><th>${escapeHTML(t("Source"))}</th><th>${escapeHTML(t("Status"))}</th><th>${escapeHTML(t("Record granularity"))}</th><th>${escapeHTML(t("Provided metrics"))}</th><th>${escapeHTML(t("Latest available session activity"))}</th><th>${escapeHTML(t("Read warnings and limits"))}</th><th>${escapeHTML(t("Actions"))}</th></tr></thead><tbody>${rows
           .map((row) => {
             const contextEvidence = (tokenLastReport?.native?.context_evidence ?? []).find((item) => item.harness === row.harness);
             const statusClass = ["covered", "silent", "inactive", "not_instrumented"].includes(row.status) ? pillClass[row.status] : "muted";
@@ -3293,7 +3509,8 @@ function formatCompactTokens(value) {
   if (!Number.isFinite(number) || number < 0) {
     return "-";
   }
-  const units = ["", "K", "M", "G", "T", "P", "E"];
+  // Token counts follow the industry convention (K/M/B/T), not byte-style G.
+  const units = ["", "K", "M", "B", "T", "P", "E"];
   let scaled = number;
   let unit = 0;
   while (scaled >= 1000 && unit < units.length - 1) {
@@ -3343,10 +3560,18 @@ async function loadDetections() {
     const resp = await getJSON("/api/detections");
     state.error = null;
     state.detections = resp;
-  renderDetections(resp);
+    const meta = $("#detections-meta");
+    if (meta) {
+      const skipped = resp?.skipped?.length ?? 0;
+      meta.hidden = !skipped;
+      meta.textContent = skipped ? t("{count} rule files were skipped because they require a newer Beacon.", { count: skipped }) : "";
+    }
+    renderDetections(resp);
   } catch (err) {
     state.error = err;
-    setText("#detections-meta", t("Failed to load detections: {error}", { error: err.message }));
+    const meta = $("#detections-meta");
+    if (meta) meta.hidden = false;
+    setText("#detections-meta", t(state.detections ? "Rule refresh failed; showing the last successful results: {error}" : "Failed to load detections: {error}", { error: err.message }));
   }
 }
 
@@ -3362,10 +3587,10 @@ function detectionSeverityPill(severity) {
 
 function detectionStatusPill(status) {
   if (status === "stable") {
-    return `<span class="state-pill ok">${escapeHTML(t("Active"))}</span>`;
+    return `<span class="state-pill ok">${escapeHTML(t("Stable"))}</span>`;
   }
   if (status === "experimental") {
-    return `<span class="state-pill muted">${escapeHTML(t("Observation only"))}</span>`;
+    return `<span class="state-pill muted">${escapeHTML(t("Experimental"))}</span>`;
   }
   return `<span class="state-pill muted">${escapeHTML(status || t("Unknown"))}</span>`;
 }
@@ -3398,7 +3623,7 @@ function renderDetections(resp) {
   const filtered = rules.filter((rule) => {
     if (detectionSeverity && rule.severity !== detectionSeverity) return false;
     if (detectionQuery) {
-      const haystack = [rule.id, rule.title, rule.description, rule.reason]
+      const haystack = [rule.id, rule.title, rule.description, rule.reason, rule.taxonomy?.beacon_category, detectionTaxonomyLabel(rule.taxonomy)]
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
@@ -3407,15 +3632,15 @@ function renderDetections(resp) {
     return true;
   });
   const active = rules.filter((rule) => rule.status === "stable").length;
-  const observation = rules.length - active;
+  const experimental = rules.filter((rule) => rule.status === "experimental").length;
   const categories = new Set(rules.map((rule) => rule.taxonomy?.beacon_category).filter(Boolean));
 
   const kpis = $("#detection-kpis");
   if (kpis) {
     const cards = [
       { label: t("Rules total"), value: String(rules.length) },
-      { label: t("Active"), value: String(active) },
-      { label: t("Observation only"), value: String(observation) },
+      { label: t("Stable rules"), value: String(active) },
+      { label: t("Experimental rules"), value: String(experimental) },
       { label: t("Rule categories"), value: String(categories.size) },
     ];
     kpis.innerHTML = cards
@@ -3448,7 +3673,7 @@ function renderDetections(resp) {
   const tbody = $("#detections-rows");
   if (!tbody) return;
   if (!filtered.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="muted">${escapeHTML(t("No active rules."))}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">${escapeHTML(t(rules.length ? "No matching rules." : "No rules were returned."))}</td></tr>`;
     return;
   }
   tbody.innerHTML = filtered
@@ -3458,7 +3683,7 @@ function renderDetections(resp) {
         <td>${escapeHTML(detectionTaxonomyLabel(rule.taxonomy))}</td>
         <td>${detectionSeverityPill(rule.severity)}</td>
         <td>${detectionStatusPill(rule.status)}</td>
-        <td>${escapeHTML(rule.posture || "")}</td>
+        <td>${escapeHTML(detectionPostureLabel(rule.posture))}</td>
         <td>${detectionKindChip(rule.kind)}</td>
         <td>${badge(rule.source || "unknown", "badge-muted")}</td>
         <td class="reason-cell">${escapeHTML(rule.reason || "")}</td>
@@ -3466,6 +3691,12 @@ function renderDetections(resp) {
     `)
     .join("");
   scrollDetectionHashIntoView();
+}
+
+function detectionPostureLabel(posture) {
+  if (posture === "detect") return t("Detection only");
+  if (posture === "enforce-capable") return t("Enforcement-capable rule");
+  return posture || t("Unknown");
 }
 
 function scrollDetectionHashIntoView({ force = false } = {}) {
@@ -3484,7 +3715,13 @@ function scrollDetectionHashIntoView({ force = false } = {}) {
 }
 
 let findingsLastResponse = null;
+let findingsRulesPending = null;
+const findingsSessionsPending = new Map();
 async function loadFindings() {
+  if (state.findingsLoading) return;
+  state.findingsLoading = true;
+  const exportButton = $("#findings-export");
+  if (exportButton) exportButton.disabled = true;
   const params = new URLSearchParams(window.location.search);
   const minSeverity = (params.get("min_severity") || "").trim();
   const select = $("#min-severity");
@@ -3496,12 +3733,28 @@ async function loadFindings() {
   const suffix = query.toString() ? `?${query.toString()}` : "";
   try {
     const resp = await getJSON(`/api/findings${suffix}`);
+    if (!resp || !Array.isArray(resp.findings) || !Number.isInteger(resp.scanned) || resp.scanned < 0 || !Number.isInteger(resp.count) || resp.count < 0 || (resp.skipped !== undefined && !Array.isArray(resp.skipped))) {
+      throw new Error(t("Invalid findings response"));
+    }
     state.error = null;
+    state.findingsLoading = false;
     findingsLastResponse = resp;
+    const alert = $("#findings-alert");
+    if (alert) {
+      const skipped = resp?.skipped?.length ?? 0;
+      alert.hidden = !skipped;
+      alert.textContent = skipped ? t("{count} rule files were skipped because they require a newer Beacon.", { count: skipped }) : "";
+    }
     renderFindings(resp);
   } catch (err) {
     state.error = err;
-    setText("#findings-meta", t("Failed to load findings: {error}", { error: err.message }));
+    const exportButton = $("#findings-export");
+    if (exportButton) exportButton.disabled = true;
+    const alert = $("#findings-alert");
+    if (alert) alert.hidden = false;
+    setText("#findings-alert", t(findingsLastResponse ? "Findings refresh failed; showing the last successful results: {error}" : "Failed to load findings: {error}", { error: err.message }));
+  } finally {
+    state.findingsLoading = false;
   }
 }
 
@@ -3533,14 +3786,26 @@ function remapFindingExpansions(previous, findings, expanded) {
   return new Set(nextKeys.flatMap((key, i) => selected.has(key) && nextCounts.get(key) === 1 ? [i] : []));
 }
 
+function sortFindings(findings, order) {
+  if (order !== "recent") return findings;
+  const latest = (finding) => (finding.events || []).reduce((result, item) => {
+    const timestamp = Date.parse(item.timestamp);
+    return Number.isFinite(timestamp) ? Math.max(result, timestamp) : result;
+  }, -Infinity);
+  return [...findings].sort((a, b) => latest(b) - latest(a) || 0);
+}
+
 function renderFindings(resp) {
   const search = ($("#findings-search")?.value || "").trim().toLocaleLowerCase();
   const all = resp?.findings || [];
-  state.findingsExpanded = remapFindingExpansions(state.findings, all, state.findingsExpanded);
-  const findings = all.filter((item) =>
+  const filtered = all.filter((item) =>
     [item.rule_id, item.title, item.session_id, item.reason].some((value) => String(value || "").toLocaleLowerCase().includes(search))
   );
+  const findings = sortFindings(filtered, $("#findings-sort")?.value);
+  state.findingsExpanded = remapFindingExpansions(state.findings, findings, state.findingsExpanded);
   state.findings = findings;
+  const exportButton = $("#findings-export");
+  if (exportButton) exportButton.disabled = findings.length === 0 || Boolean(state.error) || Boolean(state.findingsLoading);
   setText("#findings-meta", t("{count} findings across {total} events", { count: findings.length, total: resp?.scanned || 0 }));
   const sessions = new Set(findings.map((item) => item.session_id).filter(Boolean));
   const critical = findings.filter((item) => item.severity === "critical").length;
@@ -3578,9 +3843,38 @@ function renderFindings(resp) {
   applyFindingExpansions();
 }
 
+function findingsCSV(findings) {
+  const fields = ["severity", "rule_id", "title", "session_id", "reason", "latest_evidence_at"];
+  const cell = (value) => {
+    let text = value == null ? "" : String(value);
+    if (/^\s*[=+@-]/u.test(text)) text = `'${text}`;
+    return `"${text.replaceAll('"', '""')}"`;
+  };
+  const latest = (finding) => (finding.events || []).reduce((result, item) => {
+    const time = Date.parse(item.timestamp);
+    return Number.isFinite(time) && (result === null || time > Date.parse(result)) ? item.timestamp : result;
+  }, null);
+  return [fields, ...findings.map((finding) => fields.map((field) => field === "latest_evidence_at" ? latest(finding) : finding[field]))]
+    .map((row) => row.map(cell).join(",")).join("\r\n");
+}
+
+function exportFindings() {
+  if (!state.findings.length) return;
+  const url = URL.createObjectURL(new Blob(["\uFEFF", findingsCSV(state.findings)], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `beacon-findings-${Date.now()}.csv`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function toggleFinding(i) {
   if (state.findingsExpanded.has(i)) state.findingsExpanded.delete(i);
-  else state.findingsExpanded.add(i);
+  else {
+    state.findingsRulesError = null;
+    state.findingsSessionErrors.delete(state.findings[i]?.session_id);
+    state.findingsExpanded.add(i);
+  }
   applyFindingExpansions();
 }
 
@@ -3618,24 +3912,31 @@ function findingDetailHTML(i) {
 
 async function ensureDetectionsCache() {
   if (state.findingsRules) return state.findingsRules;
-  const resp = await getJSON("/api/detections");
-  const map = {};
-  for (const rule of resp?.rules || []) map[rule.id] = rule;
-  state.findingsRules = map;
-  return map;
+  if (!findingsRulesPending) {
+    findingsRulesPending = getJSON("/api/detections").then((resp) => {
+      const map = Object.create(null);
+      for (const rule of resp?.rules || []) map[rule.id] = rule;
+      state.findingsRules = map;
+      return map;
+    }).finally(() => { findingsRulesPending = null; });
+  }
+  return findingsRulesPending;
 }
 
 function ruleDetailHTML(ruleId) {
+  if (state.findingsRulesError) {
+    return `<div class="detail-section"><h3>${escapeHTML(t("Detection rule"))}</h3><p class="muted">${escapeHTML(t("Rule definition could not be loaded: {error}", { error: state.findingsRulesError }))}</p></div>`;
+  }
   if (!state.findingsRules) {
-    ensureDetectionsCache().then(applyFindingExpansions).catch(() => {
-      state.findingsRules = {};
+    ensureDetectionsCache().then(applyFindingExpansions).catch((error) => {
+      state.findingsRulesError = error.message || String(error);
       applyFindingExpansions();
     });
-    return `<div class="detail-section"><h3>Detection rule</h3><p class="muted">Loading rule definition&hellip;</p></div>`;
+    return `<div class="detail-section"><h3>${escapeHTML(t("Detection rule"))}</h3><p class="muted">${escapeHTML(t("Loading rule definition…"))}</p></div>`;
   }
   const rule = state.findingsRules[ruleId];
   if (!rule) {
-    return `<div class="detail-section"><h3>Detection rule</h3><p class="muted">No active rule found for <span class="mono">${escapeHTML(ruleId)}</span> — it may have been removed from the active set.</p></div>`;
+    return `<div class="detail-section"><h3>${escapeHTML(t("Detection rule"))}</h3><p class="muted">${escapeHTML(t("No active rule found for {id}; it may have been removed.", { id: ruleId }))}</p></div>`;
   }
   const rows = [
     [t("Rule"), rule.id],
@@ -3650,39 +3951,43 @@ function ruleDetailHTML(ruleId) {
   const taxonomy = rule.taxonomy ? Object.entries(rule.taxonomy) : [];
   return `
     <div class="detail-section">
-      <h3>Detection rule</h3>
+      <h3>${escapeHTML(t("Detection rule"))}</h3>
       <div class="detail-grid">
         ${rows.map(([label, value]) => `<div><span class="muted">${escapeHTML(label)}</span><strong>${escapeHTML(value)}</strong></div>`).join("")}
       </div>
       ${rule.description ? `<p>${escapeHTML(rule.description)}</p>` : ""}
       ${taxonomy.length ? `<div class="detail-tags">${taxonomy.map(([key, value]) => badge(`${key}: ${value}`, "badge-muted")).join("")}</div>` : ""}
-      <a class="text-button" href="/detections.html#rule-${escapeHTML(rule.id)}">Open in Detections</a>
+      <a class="text-button" href="/detections.html?lang=${encodeURIComponent(window.BeaconI18n.language)}#rule-${encodeURIComponent(rule.id)}">${escapeHTML(t("Open in Detections"))}</a>
     </div>
   `;
 }
 
 function sessionDetailHTML(sessionId) {
   if (!sessionId) {
-    return `<div class="detail-section"><h3>Session timeline</h3><p class="muted">This finding is not tied to a single session.</p></div>`;
+    return `<div class="detail-section"><h3>${escapeHTML(t("Session timeline"))}</h3><p class="muted">${escapeHTML(t("This finding is not tied to a single session."))}</p></div>`;
+  }
+  if (state.findingsSessionErrors.has(sessionId)) {
+    return `<div class="detail-section"><h3>${escapeHTML(t("Session timeline"))}</h3><p class="muted">${escapeHTML(t("Session timeline could not be loaded: {error}", { error: state.findingsSessionErrors.get(sessionId) }))}</p></div>`;
   }
   if (!state.findingsSessions.has(sessionId)) {
-    ensureSessionEvents(sessionId).then(applyFindingExpansions).catch(() => {
-      state.findingsSessions.set(sessionId, []);
+    ensureSessionEvents(sessionId).then(applyFindingExpansions).catch((error) => {
+      state.findingsSessionErrors.set(sessionId, error.message || String(error));
       applyFindingExpansions();
     });
-    return `<div class="detail-section"><h3>Session timeline</h3><p class="muted">Loading session timeline&hellip;</p></div>`;
+    return `<div class="detail-section"><h3>${escapeHTML(t("Session timeline"))}</h3><p class="muted">${escapeHTML(t("Loading session timeline…"))}</p></div>`;
   }
-  const records = state.findingsSessions.get(sessionId);
+  const { records, truncated, total } = state.findingsSessions.get(sessionId);
   if (!records.length) {
-    return `<div class="detail-section"><h3>Session timeline</h3><p class="muted">No events found for session <span class="mono">${escapeHTML(formatSessionID(sessionId))}</span>.</p></div>`;
+    return `<div class="detail-section"><h3>${escapeHTML(t("Session timeline"))}</h3><p class="muted">${escapeHTML(t("No events found for session {id}.", { id: formatSessionID(sessionId) }))}</p></div>`;
   }
   return `
     <div class="detail-section">
       <div class="detail-head">
-        <h3>Session timeline</h3>
+        <h3>${escapeHTML(t("Session timeline"))}</h3>
         <span class="muted">${escapeHTML(formatSessionID(sessionId))} &middot; ${records.length} event${records.length === 1 ? "" : "s"}</span>
-        <a class="text-button" href="/?session=${encodeURIComponent(sessionId)}&range=all&session_state=">Open in Agent Activity Sessions</a>
+        <a class="text-button" href="${escapeHTML(sessionPageURL(sessionId))}">${escapeHTML(t("Open session details"))}</a>
       </div>
+      ${truncated ? `<p class="muted">${escapeHTML(t("Showing {shown} of {total} events; the timeline is incomplete.", { shown: records.length, total }))}</p>` : ""}
       <ol class="session-timeline">${records.map((record) => sessionTimelineRow(record)).join("")}</ol>
     </div>
   `;
@@ -3690,14 +3995,22 @@ function sessionDetailHTML(sessionId) {
 
 async function ensureSessionEvents(sessionId) {
   if (state.findingsSessions.has(sessionId)) return state.findingsSessions.get(sessionId);
-  const resp = await getJSON(`/api/events?session=${encodeURIComponent(sessionId)}&limit=500`);
-  const records = (resp?.events || []).slice().sort((a, b) => {
-    const at = new Date(a.event?.timestamp || 0).getTime();
-    const bt = new Date(b.event?.timestamp || 0).getTime();
-    return at - bt;
-  });
-  state.findingsSessions.set(sessionId, records);
-  return records;
+  if (!findingsSessionsPending.has(sessionId)) {
+    // The session endpoint checks the full ID; /api/events uses substring matching.
+    const pending = getJSON(`/api/session?id=${encodeURIComponent(sessionId)}`).then((resp) => {
+      const allRecords = (resp?.events || []).slice().sort((a, b) => {
+        const at = new Date(a.event?.timestamp || 0).getTime();
+        const bt = new Date(b.event?.timestamp || 0).getTime();
+        return at - bt;
+      });
+      const records = allRecords.slice(-500);
+      const result = { records, truncated: allRecords.length > records.length, total: allRecords.length };
+      state.findingsSessions.set(sessionId, result);
+      return result;
+    }).finally(() => { findingsSessionsPending.delete(sessionId); });
+    findingsSessionsPending.set(sessionId, pending);
+  }
+  return findingsSessionsPending.get(sessionId);
 }
 
 function sessionTimelineRow(record) {
@@ -3783,65 +4096,131 @@ function setupNavCollapse() {
   });
 }
 
+const memoryPageSize = 50;
+let memoryView = "evaluations";
+let memoryPage = 1;
+let memoryQuery = "";
+let memoryGeneration = 0;
+
 async function loadMemory() {
   if (!isMemoryPage) return;
+  const generation = ++memoryGeneration;
   state.loading = true;
   state.error = null;
   renderMemoryLoading();
   try {
-    state.memory = await getJSON("/api/memory?limit=50");
+    const query = new URLSearchParams({ limit: String(memoryPageSize), page: String(memoryPage) });
+    if (memoryQuery) query.set("q", memoryQuery);
+    const data = await getJSON(`/api/memory?${query}`);
+    if (generation !== memoryGeneration) return;
+    state.memory = data;
+    state.memoryLoadedQuery = memoryQuery;
+    state.memoryLoadedPage = memoryPage;
   } catch (err) {
-    state.error = err;
+    if (generation === memoryGeneration) state.error = err;
   } finally {
-    state.loading = false;
-    renderMemory();
+    if (generation === memoryGeneration) {
+      state.loading = false;
+      renderMemory();
+    }
   }
 }
 
 function renderMemoryLoading() {
   setText("#memory-status", t("Loading Beacon memory..."));
+  if ($("#memory-prev")) $("#memory-prev").disabled = true;
+  if ($("#memory-next")) $("#memory-next").disabled = true;
+}
+
+function setupMemoryControls() {
+  const search = $("#memory-search");
+  $("#memory-search-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    memoryQuery = search?.value.trim() || "";
+    memoryPage = 1;
+    loadMemory().catch(console.error);
+  });
+  $("#memory-clear")?.addEventListener("click", () => {
+    if (search) search.value = "";
+    memoryQuery = "";
+    memoryPage = 1;
+    loadMemory().catch(console.error);
+  });
+  $$("[data-memory-view]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (button.dataset.memoryView === memoryView) return;
+      memoryView = button.dataset.memoryView;
+      memoryPage = 1;
+      loadMemory().catch(console.error);
+    });
+  });
+  $("#memory-prev")?.addEventListener("click", () => {
+    if (memoryPage <= 1) return;
+    memoryPage -= 1;
+    loadMemory().catch(console.error);
+  });
+  $("#memory-next")?.addEventListener("click", () => {
+    memoryPage += 1;
+    loadMemory().catch(console.error);
+  });
 }
 
 function renderMemory() {
   if (!isMemoryPage) return;
   if (state.error) {
-    setText("#memory-status", state.error.message || String(state.error));
+    setText("#memory-status", t(state.memory ? "Memory refresh failed; showing the last successful results: {error}" : "Memory could not be loaded: {error}", { error: state.error.message || String(state.error) }));
+    if ($("#memory-prev")) $("#memory-prev").disabled = true;
+    if ($("#memory-next")) $("#memory-next").disabled = true;
     return;
   }
   const data = state.memory || {};
   const status = data.status || {};
-  setText("#memory-status", t("{evaluations} evaluations, {candidates} candidates, {memories} approved memories", { evaluations: status.evaluations || 0, candidates: status.candidates || 0, memories: status.approved_memories || 0 }));
+  const counts = [[t("Evaluations"), status.evaluations], [t("Candidates"), status.candidates], [t("Approved Memory"), status.approved_memories]];
+  const summary = $("#memory-summary");
+  if (summary) summary.innerHTML = counts.map(([label, value]) => `<div class="inventory-summary-card"><span>${escapeHTML(label)}</span><strong>${escapeHTML(Number.isFinite(value) ? String(value) : "—")}</strong></div>`).join("");
+  setText("#memory-status", t("{evaluations} evaluations, {candidates} candidates, {memories} approved memories", { evaluations: status.evaluations ?? "—", candidates: status.candidates ?? "—", memories: status.approved_memories ?? "—" }));
   renderMemoryTable("#memory-evaluations", data.evaluations || [], (item) => [
     item.id || "",
     item.trace?.id || "",
     item.status || "",
     formatScore(item.score),
     item.trace?.title || "",
-  ]);
+  ], 5);
   renderMemoryTable("#memory-candidates", data.candidates || [], (item) => [
     item.id || "",
     item.state || "",
     item.kind || "",
     item.title || "",
-  ]);
+  ], 4);
   renderMemoryTable("#memory-approved", data.memories || [], (item) => [
     item.id || "",
     item.kind || "",
     item.title || "",
     item.applicability || "",
-  ]);
+  ], 4);
+  $$("[data-memory-panel]").forEach((panel) => { panel.hidden = panel.dataset.memoryPanel !== memoryView; });
+  $$("[data-memory-view]").forEach((button) => {
+    const active = button.dataset.memoryView === memoryView;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const rows = data[memoryView] || [];
+  setText("#memory-range", t("Showing {shown} records on page {page}; counts above cover the entire store.", { shown: rows.length, page: state.memoryLoadedPage }));
+  setText("#memory-page", t("Page {page}", { page: state.memoryLoadedPage }));
+  if ($("#memory-prev")) $("#memory-prev").disabled = memoryPage <= 1;
+  if ($("#memory-next")) $("#memory-next").disabled = rows.length < memoryPageSize;
 }
 
-function renderMemoryTable(selector, items, rowFn) {
+function renderMemoryTable(selector, items, rowFn, columnCount) {
   const tbody = $(selector);
   if (!tbody) return;
   tbody.innerHTML = "";
   if (!items.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 5;
+    cell.colSpan = columnCount;
     cell.className = "muted";
-    cell.textContent = t("No records yet.");
+    cell.textContent = t(state.memoryLoadedQuery ? "No records match this search." : "No records yet.");
     row.append(cell);
     tbody.append(row);
     return;
@@ -3866,7 +4245,10 @@ decorateDashboardNav();
 setupNavCollapse();
 
 $("#findings-search")?.addEventListener("input", () => {
-  state.findingsExpanded.clear();
+  if (findingsLastResponse) renderFindings(findingsLastResponse);
+});
+$("#findings-export")?.addEventListener("click", exportFindings);
+$("#findings-sort")?.addEventListener("change", () => {
   if (findingsLastResponse) renderFindings(findingsLastResponse);
 });
 $("#min-severity")?.addEventListener("change", (event) => {
@@ -3877,6 +4259,11 @@ $("#min-severity")?.addEventListener("change", (event) => {
 });
 
 $("#inventory-show-all")?.addEventListener("change", () => renderInventoryConfigs(state.inventory?.configs || []));
+$("#hook-search")?.addEventListener("input", () => {
+  const ctx = currentInventoryContext();
+  renderHookTargets(ctx.hooks, ctx.configs);
+  renderHookManifests(ctx.hookConfigs);
+});
 $("#inventory-runtime-filter")?.addEventListener("change", (event) => {
   state.inventoryRuntime = event.target.value;
   updateInventoryURL();
@@ -4348,6 +4735,7 @@ if (isDetectionsPage) {
       detectionSeverity = button.dataset.severity;
       for (const option of severityTabs.querySelectorAll("button")) {
         option.classList.toggle("active", option === button);
+        option.setAttribute("aria-pressed", String(option === button));
       }
       const rules = state.detections?.rules ?? [];
       renderDetections({ rules });
@@ -4361,8 +4749,9 @@ if (isDetectionsPage) {
       renderDetections({ rules });
     });
   }
+  window.__beaconForceRefresh = () => refreshData(loadDetections);
   loadDetections().catch(console.error);
-  setInterval(() => loadDetections().catch(console.error), 60000);
+  setInterval(() => { if (!document.hidden) refreshData(loadDetections).catch(console.error); }, 60000);
 } else if (isFindingsPage) {
   window.__beaconForceRefresh = () => refreshData(loadFindings);
   loadFindings().catch(console.error);
@@ -4389,6 +4778,7 @@ if (isDetectionsPage) {
   setInterval(() => { if (!document.hidden && tokenAutoRefresh) refreshData(loadTokens).catch(console.error); }, 60000);
 } else if (isSessionDetailPage) {
   initLensTabs().catch(console.error);
+  $("#session-detail-retry")?.addEventListener("click", () => refreshData(loadSessionPage).catch(console.error));
   window.__beaconForceRefresh = () => refreshData(loadSessionPage);
   loadSessionPage().catch(console.error);
   setInterval(() => { if (!document.hidden) refreshData(loadSessionPage).catch(console.error); }, 60000);
@@ -4398,6 +4788,7 @@ if (isDetectionsPage) {
   loadInventory().catch(console.error);
   setInterval(() => { if (!document.hidden) refreshData(loadInventory).catch(console.error); }, 60000);
 } else if (isMemoryPage) {
+  setupMemoryControls();
   window.__beaconForceRefresh = () => refreshData(loadMemory);
   loadMemory().catch(console.error);
   setInterval(() => { if (!document.hidden) refreshData(loadMemory).catch(console.error); }, 60000);

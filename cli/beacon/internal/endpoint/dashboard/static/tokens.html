@@ -66,14 +66,20 @@
           <button type="button" data-lang="en">EN</button>
         </div>
         <button type="button" class="btn-secondary" id="shell-refresh" data-i18n="Refresh">Refresh</button>
-        <button type="button" class="btn-secondary" id="shell-export" data-i18n="Export">Export</button>
+        <details class="shell-export-menu" id="shell-export">
+          <summary class="btn-secondary" data-i18n="Export">Export</summary>
+          <div class="shell-export-options">
+            <button type="button" id="shell-export-csv">CSV</button>
+            <button type="button" id="shell-export-json">JSON</button>
+          </div>
+        </details>
       </div>
     </header>
 
     <main>
       <section class="filter-shell" id="token-filter-section">
         <form id="token-filter-form">
-          <input type="hidden" name="range" value="all">
+          <input type="hidden" name="range" value="7d">
           <span class="filter-label" data-i18n="Time">Time</span>
           <span class="time-pills" id="time-pills">
             <button type="button" data-range="today" data-i18n="Today">Today</button>
@@ -128,6 +134,7 @@
           </div>
           <div class="chart-legend" id="token-trend-legend"></div>
           <div class="trend-chart" id="token-trend"></div>
+          <details class="section-pad"><summary data-i18n="View trend data">View trend data</summary><div id="token-trend-table" class="table-scroll"></div></details>
           <p class="chart-footnote" id="trend-view-note" hidden></p>
           <p class="chart-footnote" data-i18n="Total = fresh input + cache read + cache write + output; reasoning is included in output.">Total = fresh input + cache read + cache write + output; reasoning is included in output.</p>
         </section>
@@ -194,6 +201,7 @@
             <button type="button" class="btn-secondary" id="agent-export-csv">CSV</button>
             <button type="button" class="btn-secondary" id="agent-export-json">JSON</button>
           </div>
+          <p class="method-note" data-i18n="Exports include the report selected by the global filters; Agent search and table filters do not change export contents.">Exports include the report selected by the global filters; Agent search and table filters do not change export contents.</p>
           <div class="table-scroll" id="agent-consumption-cards"></div>
           <p class="method-note" id="agent-footnote"></p>
         </section>
@@ -234,6 +242,11 @@
             <span class="toolbar-count" id="token-session-count"></span>
           </div>
           <div class="table-scroll" id="agent-dimension-table"></div>
+          <div class="table-toolbar" id="dimension-pagination" hidden aria-label="Pagination">
+            <button type="button" id="dimension-prev" data-i18n="Previous page">Previous page</button>
+            <span id="dimension-page" aria-live="polite"></span>
+            <button type="button" id="dimension-next" data-i18n="Next page">Next page</button>
+          </div>
         </section>
         <section class="panel" id="token-utilization-panel">
           <div class="section-pad">
@@ -282,13 +295,18 @@
         <div class="import-grid">
           <section class="import-card">
             <h3><span class="local-dot"></span><span data-i18n="Grok Bot usage snapshot import">Grok Bot usage snapshot import</span></h3>
+            <p data-i18n="Grok Bot has no live capture path; import a verified JSON snapshot to include its usage in statistics.">Grok Bot has no live capture path; import a verified JSON snapshot to include its usage in statistics.</p>
+            <button type="button" id="grok-open-dialog" class="btn-primary" data-i18n="Import usage snapshot">Import usage snapshot</button>
+            <dialog id="grok-import-dialog" class="grok-import-dialog" aria-labelledby="grok-import-title">
+              <div class="agent-detail-head"><h2 id="grok-import-title" data-i18n="Grok Bot usage snapshot import">Grok Bot usage snapshot import</h2><button type="button" id="grok-dialog-close" data-i18n="Close">Close</button></div>
             <div class="import-dropzone" id="grok-dropzone">
-              <strong data-i18n="No snapshot imported yet">No snapshot imported yet</strong>
+              <strong data-i18n="Drop a JSON snapshot here or choose a file">Drop a JSON snapshot here or choose a file</strong>
               <span data-i18n="Grok Bot has no live capture path; import a verified JSON snapshot to include its usage in statistics.">Grok Bot has no live capture path; import a verified JSON snapshot to include its usage in statistics.</span>
               <span class="dropzone-actions">
                 <label class="btn-primary import-file-label"><span data-i18n="Import usage snapshot">Import usage snapshot</span><input id="grok-usage-file" type="file" accept="application/json,.json" class="import-file-input"></label>                <button type="button" class="btn-secondary" id="grok-format-sample" data-i18n="View format example">View format example</button>
               </span>
             </div>
+            <pre id="grok-format-output" class="grok-format-output" hidden></pre>
             <div class="import-file-row" id="grok-file-row" hidden>
               <span id="grok-file-name"></span>
               <span class="file-meta" id="grok-file-meta"></span>
@@ -317,6 +335,7 @@
               <button type="button" class="btn-primary" id="grok-usage-import" disabled data-i18n="Import and replace snapshot">Import and replace snapshot</button>
             </div>
             <p class="import-footnote"><span data-i18n="Files are parsed locally and never uploaded.">Files are parsed locally and never uploaded.</span></p>
+            </dialog>
           </section>
           <section class="import-card import-state-card">
             <h3><span class="local-dot"></span><span data-i18n="Import status">Import status</span></h3>
@@ -347,6 +366,25 @@
       </div>
     </main>
 
+    <dialog id="agent-detail-dialog" class="agent-detail-dialog" aria-labelledby="agent-detail-title">
+      <div class="agent-detail-head">
+        <h2 id="agent-detail-title"></h2>
+        <button type="button" id="agent-detail-close" data-i18n="Close">Close</button>
+      </div>
+      <div id="agent-detail-content"></div>
+      <button type="button" id="agent-detail-filter" data-i18n="View this Agent's details">View this Agent's details</button>
+    </dialog>
+    <dialog id="token-session-dialog" class="agent-detail-dialog" aria-labelledby="token-session-title">
+      <div class="agent-detail-head">
+        <h2 id="token-session-title" data-i18n="Session details">Session details</h2>
+        <button type="button" id="token-session-close" data-i18n="Close">Close</button>
+      </div>
+      <div id="token-session-content"></div>
+      <button type="button" id="token-session-copy" data-i18n="Copy session ID">Copy session ID</button>
+      <span id="token-session-copy-status" role="status" aria-live="polite"></span>
+      <a id="token-session-events" data-i18n="View session events">View session events</a>
+      <p id="token-session-no-events" class="muted" hidden></p>
+    </dialog>
     <div class="trend-tooltip" id="trend-tooltip"></div>
     <script src="/i18n.js?v=2"></script>
     <script src="/token-insights.js?v=2"></script>

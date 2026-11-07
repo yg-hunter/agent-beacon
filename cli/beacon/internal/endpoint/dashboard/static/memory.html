@@ -76,8 +76,23 @@
           <p id="memory-status" class="muted" data-i18n="Loading Beacon memory...">Loading Beacon memory...</p>
         </div>
       </section>
-
+      <p class="muted" data-i18n="Memory is read-only here; review and write operations are not available on this page.">Memory is read-only here; review and write operations are not available on this page.</p>
+      <div class="inventory-summary" id="memory-summary" aria-live="polite"></div>
       <section class="panel">
+        <form id="memory-search-form" class="table-toolbar">
+          <label><span data-i18n="Search memory">Search memory</span> <input id="memory-search" type="search" autocomplete="off"></label>
+          <button type="submit" data-i18n="Search">Search</button>
+          <button type="button" id="memory-clear" data-i18n="Clear">Clear</button>
+        </form>
+        <div class="table-toolbar" id="memory-tabs" aria-label="Memory record types" data-i18n-aria-label="Memory record types">
+          <button type="button" data-memory-view="evaluations" data-i18n="Evaluations">Evaluations</button>
+          <button type="button" data-memory-view="candidates" data-i18n="Candidates">Candidates</button>
+          <button type="button" data-memory-view="memories" data-i18n="Approved Memory">Approved Memory</button>
+        </div>
+        <p id="memory-range" class="muted" role="status"></p>
+      </section>
+
+      <section class="panel" data-memory-panel="evaluations">
         <h2 data-i18n="Evaluations">Evaluations</h2>
         <div class="table-wrap">
           <table>
@@ -95,7 +110,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-memory-panel="candidates" hidden>
         <h2 data-i18n="Candidates">Candidates</h2>
         <div class="table-wrap">
           <table>
@@ -112,7 +127,7 @@
         </div>
       </section>
 
-      <section class="panel">
+      <section class="panel" data-memory-panel="memories" hidden>
         <h2 data-i18n="Approved Memory">Approved Memory</h2>
         <div class="table-wrap">
           <table>
@@ -128,6 +143,11 @@
           </table>
         </div>
       </section>
+      <div class="table-toolbar">
+        <button type="button" id="memory-prev" data-i18n="Previous page">Previous page</button>
+        <span id="memory-page" aria-live="polite"></span>
+        <button type="button" id="memory-next" data-i18n="Next page">Next page</button>
+      </div>
     </main>
 
     <script src="/i18n.js?v=2"></script>

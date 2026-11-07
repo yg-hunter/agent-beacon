@@ -73,13 +73,17 @@
       <div>
         <span class="session-detail-spinner" aria-hidden="true"></span>
         <p id="session-detail-status-message" data-i18n="Loading session details...">Loading session details...</p>
+        <div id="session-detail-error-actions" hidden>
+          <button type="button" id="session-detail-retry" data-i18n="Retry">Retry</button>
+          <a class="session-back-link" href="/" data-i18n="Back to agent activity">Back to agent activity</a>
+        </div>
       </div>
     </div>
 
     <main id="session-detail-view" class="session-detail-main" hidden>
       <a class="session-back-link" href="/">
         <span aria-hidden="true">&larr;</span>
-        Back to agent activity
+        <span data-i18n="Back to agent activity">Back to agent activity</span>
       </a>
 
       <div class="lens-bar">
@@ -135,7 +139,7 @@
         <div class="session-event-filters">
           <label class="session-event-search">
             <span class="search-icon" aria-hidden="true"></span>
-            <input id="session-event-search" type="search" placeholder="Search events by keyword, file, command, or message..." data-i18n-placeholder="Search events by keyword, file, command, or message..." autocomplete="off" />
+            <input id="session-event-search" type="search" aria-label="Search events" data-i18n-aria-label="Search events" placeholder="Search events by keyword, file, command, or message..." data-i18n-placeholder="Search events by keyword, file, command, or message..." autocomplete="off" />
           </label>
           <div id="session-type-filters" class="session-filter-row" aria-label="Filter events by type" data-i18n-aria-label="Filter events by type"></div>
           <div id="session-action-filters" class="session-filter-row" aria-label="Filter events by action" data-i18n-aria-label="Filter events by action"></div>

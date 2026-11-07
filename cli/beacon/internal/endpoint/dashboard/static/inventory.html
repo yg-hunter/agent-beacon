@@ -74,6 +74,7 @@
         <h1 data-i18n="Agent Inventory">Agent Inventory</h1>
         <p id="inventory-meta" class="muted" role="status"></p>
       </div>
+      <div id="inventory-summary" class="inventory-summary" aria-live="polite"></div>
 
       <section class="inventory-workspace" id="inventory-workspace">
         <div class="inventory-controls">
@@ -87,7 +88,7 @@
           </div>
           <label class="inventory-search">
             <span class="search-icon" aria-hidden="true"></span>
-            <input id="inventory-search" type="search" placeholder="Search configurations by name, status, path, or command..." />
+            <input id="inventory-search" type="search" aria-label="Search inventory" data-i18n-aria-label="Search inventory" placeholder="Search configurations by name, status, path, or command..." />
           </label>
           <div class="inventory-tabs" id="inventory-view-tabs" aria-label="Inventory views" data-i18n-aria-label="Inventory views"></div>
         </div>

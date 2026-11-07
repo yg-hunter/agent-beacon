@@ -74,30 +74,39 @@
         <h1 data-i18n="Findings">Findings</h1>
         <p class="muted" data-i18n="Review findings by severity and inspect their supporting events.">Review findings by severity and inspect their supporting events.</p>
       </div>
+      <p id="findings-alert" class="notice" role="status" aria-live="polite" hidden></p>
       <div id="findings-summary" class="cards findings-summary" aria-live="polite"></div>
       <section class="panel">
         <div class="section-head overview-head">
           <div class="section-actions">
             <label class="muted" for="min-severity" data-i18n="Min severity">Min severity</label>
             <select id="min-severity">
-              <option value="">all</option>
-              <option value="info">info</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-              <option value="critical">critical</option>
+              <option value="" data-i18n="All severities">all</option>
+              <option value="info" data-i18n="info">info</option>
+              <option value="low" data-i18n="low">low</option>
+              <option value="medium" data-i18n="medium">medium</option>
+              <option value="high" data-i18n="high">high</option>
+              <option value="critical" data-i18n="critical">critical</option>
             </select>
             <label class="muted" for="findings-search" data-i18n="Search findings">Search findings</label>
             <input id="findings-search" type="search" maxlength="150" />
+            <label class="muted" for="findings-sort" data-i18n="Sort findings">Sort findings</label>
+            <select id="findings-sort">
+              <option value="severity" data-i18n="Severity first">Severity first</option>
+              <option value="recent" data-i18n="Latest evidence first">Latest evidence first</option>
+            </select>
+            <button type="button" id="findings-export" disabled data-i18n="Export filtered findings (CSV)">Export filtered findings (CSV)</button>
             <span id="findings-meta" class="muted"></span>
           </div>
         </div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Findings results" data-i18n-aria-label="Findings results">
         <table>
           <thead>
             <tr><th data-i18n="Severity">Severity</th><th data-i18n="Rule">Rule</th><th data-i18n="Session">Session</th><th data-i18n="Reason">Reason</th><th data-i18n="Evidence">Evidence</th></tr>
           </thead>
           <tbody id="findings-rows"></tbody>
         </table>
+        </div>
       </section>
     </main>
 

@@ -95,6 +95,7 @@
                   <option value="7d" data-i18n="Last 7 days">Last 7 days</option>
                   <option value="24h" data-i18n="Last 24 hours">Last 24 hours</option>
                   <option value="all" data-i18n="All time">All time</option>
+                  <option value="custom" disabled data-i18n="Custom range">Custom range</option>
                 </select>
               </label>
               <label>
@@ -182,6 +183,7 @@
           <input type="hidden" name="review" />
         </form>
         <div id="active-filters" class="chips"></div>
+        <p id="result-meta" class="muted" role="status" aria-live="polite"></p>
         <div id="notice" class="notice" hidden></div>
         <div class="table-wrap">
           <table>

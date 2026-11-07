@@ -70,6 +70,7 @@
     </header>
 
     <main>
+      <div id="overview-notice" class="overview-notice" role="status" hidden></div>
       <section class="panel status-panel">
         <div>
           <h2 data-i18n="Capture endpoint">Capture endpoint</h2>
@@ -91,6 +92,13 @@
           </div>
           <div class="trend-chart" id="overview-hourly"></div>
           <p class="chart-footnote" id="overview-hourly-note"></p>
+          <details class="section-pad">
+            <summary data-i18n="View activity data table">View activity data table</summary>
+            <div class="table-scroll"><table>
+              <thead><tr><th scope="col" data-i18n="Time">Time</th><th scope="col" data-i18n="Sessions">Sessions</th></tr></thead>
+              <tbody id="overview-hourly-table"></tbody>
+            </table></div>
+          </details>
         </section>
         <section class="chart-panel">
           <div class="chart-head">

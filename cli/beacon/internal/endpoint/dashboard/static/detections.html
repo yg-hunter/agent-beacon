@@ -77,17 +77,18 @@
       </section>
 
       <div class="kpi-row" id="detection-kpis"></div>
+      <p id="detections-meta" class="notice" role="status" aria-live="polite" hidden></p>
 
       <section class="panel">
         <div class="table-toolbar">
           <span class="subtabs" id="detection-severity-tabs">
-            <button type="button" data-severity="" class="active" data-i18n="All severities">All severities</button>
-            <button type="button" data-severity="critical" data-i18n="critical">critical</button>
-            <button type="button" data-severity="high" data-i18n="high">high</button>
-            <button type="button" data-severity="medium" data-i18n="medium">medium</button>
-            <button type="button" data-severity="low" data-i18n="low">low</button>
+            <button type="button" data-severity="" class="active" aria-pressed="true" data-i18n="All severities">All severities</button>
+            <button type="button" data-severity="critical" aria-pressed="false" data-i18n="critical">critical</button>
+            <button type="button" data-severity="high" aria-pressed="false" data-i18n="high">high</button>
+            <button type="button" data-severity="medium" aria-pressed="false" data-i18n="medium">medium</button>
+            <button type="button" data-severity="low" aria-pressed="false" data-i18n="low">low</button>
           </span>
-          <input type="search" id="detection-search" data-i18n-placeholder="Search rules" placeholder="Search rules">
+          <input type="search" id="detection-search" aria-label="Search rules" data-i18n-aria-label="Search rules" data-i18n-placeholder="Search rules" placeholder="Search rules">
           <span class="toolbar-count" id="detection-count"></span>
         </div>
         <div class="table-scroll">
@@ -103,7 +104,7 @@
       <section class="panel">
         <div class="granularity-legend" id="detection-categories"></div>
         <div class="method-note">
-          <span data-i18n="Severity is the rule's own static posture; hit counts come from local events and do not imply any blocking action.">Severity is the rule's own static posture; hit counts come from local events and do not imply any blocking action.</span>
+          <span data-i18n="Severity, maturity and posture are rule metadata. A rule's posture does not prove that blocking is enabled.">Severity, maturity and posture are rule metadata. A rule's posture does not prove that blocking is enabled.</span>
           <a class="attention-link" href="/findings.html" data-i18n="View matching findings">View matching findings</a>
         </div>
       </section>

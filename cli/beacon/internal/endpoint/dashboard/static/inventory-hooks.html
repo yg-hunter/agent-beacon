@@ -100,6 +100,10 @@
             <p class="muted" data-i18n="Supported runtimes Beacon checks for local hook configuration. Command bodies and hook file contents are not shown.">Supported runtimes Beacon checks for local hook configuration. Command bodies and hook file contents are not shown.</p>
           </div>
         </div>
+        <div class="table-toolbar">
+          <input id="hook-search" type="search" aria-label="Search Hook assets" data-i18n-aria-label="Search Hook assets" placeholder="Search runtime, status or path" data-i18n-placeholder="Search runtime, status or path">
+          <span id="hook-target-count" class="muted" aria-live="polite"></span>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
@@ -116,6 +120,7 @@
             <tbody id="hook-targets"></tbody>
           </table>
         </div>
+        <p class="muted" data-i18n="Installed indicates an adapter was detected; it does not prove events are being collected.">Installed indicates an adapter was detected; it does not prove events are being collected.</p>
       </section>
 
       <section class="panel">
@@ -125,6 +130,7 @@
             <p class="muted" data-i18n="Discovered hook config files with parser status, timestamps, and hashes for change tracking.">Discovered hook config files with parser status, timestamps, and hashes for change tracking.</p>
           </div>
         </div>
+        <p id="hook-manifest-count" class="muted" aria-live="polite"></p>
         <div class="table-wrap">
           <table>
             <thead>
