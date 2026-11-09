@@ -379,6 +379,8 @@
     Overview: '概览',
     Findings: '风险发现',
     Analytics: '统计分析',
+        'across {total} scanned events': '覆盖扫描的 {total} 条事件',
+        'Scanned events': '扫描事件',
     'Remote hosts': '远程主机',
     "Poll another machine's read-only beacon API; plain HTTP is visible on that network":
       '轮询另一台机器的只读 Beacon API；该网络内明文可见，建议配合隧道使用',

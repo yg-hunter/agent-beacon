@@ -1935,7 +1935,7 @@ function sessionRowHTML(session) {
   return `
     <tr class="row-link" data-session-id="${escapeHTML(session.id)}">
       <td class="mono"><a class="cell-link" href="${escapeHTML(sessionPageURL(session.id))}">${escapeHTML(formatSessionID(session.id))}</a></td>
-      <td>${badge(session.max_severity || "unknown", `severity-${session.max_severity || "unknown"}`)}${review ? `<br /><span class="muted">${escapeHTML(review)} review</span>` : ""}</td>
+      <td>${findingsSeverityPill(session.max_severity || "unknown")}${review ? `<br /><span class="muted">${escapeHTML(review)} review</span>` : ""}</td>
       <td>${sessionHarnessCell(session)}</td>
       <td class="col-message">
         <span class="session-list-prompt">
@@ -3578,6 +3578,13 @@ async function loadDetections() {
 let detectionSeverity = "";
 let detectionQuery = "";
 
+function findingsSeverityPill(severity) {
+  const labels = { critical: "critical", high: "high", medium: "medium", low: "low" };
+  const classes = { critical: "danger", high: "high", medium: "medium", low: "muted", unknown: "muted" };
+  const key = labels[severity] ? severity : "unknown";
+  return `<span class="state-pill ${classes[severity] ?? "muted"}">${escapeHTML(t(labels[key] ?? severity))}</span>`;
+}
+
 function detectionSeverityPill(severity) {
   const labels = { critical: "critical", high: "high", medium: "medium", low: "low" };
   const classes = { critical: "danger", high: "high", medium: "medium", low: "muted" };
@@ -3809,9 +3816,21 @@ function renderFindings(resp) {
   setText("#findings-meta", t("{count} findings across {total} events", { count: findings.length, total: resp?.scanned || 0 }));
   const sessions = new Set(findings.map((item) => item.session_id).filter(Boolean));
   const critical = findings.filter((item) => item.severity === "critical").length;
-  const summary = $("#findings-summary");
-  if (summary) {
-    summary.innerHTML = [["Findings in range", findings.length], ["Critical findings", critical], ["Affected sessions", sessions.size]].map(([label, count]) => `<div class="card"><span class="muted">${escapeHTML(t(label))}</span><strong class="value">${escapeHTML(String(count))}</strong></div>`).join("");
+  const kpis = $("#findings-kpis");
+  if (kpis) {
+    const scanned = resp?.scanned || 0;
+    const cards = [
+      { label: t("Findings in range"), value: String(findings.length), hint: t("across {total} scanned events", { total: scanned }) },
+      { label: t("Critical findings"), value: String(critical), hint: "" },
+      { label: t("Affected sessions"), value: String(sessions.size), hint: "" },
+      { label: t("Scanned events"), value: Number(scanned).toLocaleString(), hint: "" },
+    ];
+    kpis.innerHTML = cards
+      .map(
+        (card) =>
+          `<div class="kpi-card"><span class="kpi-label">${escapeHTML(card.label)}</span><span class="kpi-value">${escapeHTML(card.value)}</span>${card.hint ? `<span class="kpi-hint">${escapeHTML(card.hint)}</span>` : ""}</div>`,
+      )
+      .join("");
   }
   const tbody = $("#findings-rows");
   if (!tbody) return;
@@ -3823,7 +3842,7 @@ function renderFindings(resp) {
   tbody.innerHTML = findings
     .map((f, i) => `
       <tr class="finding-row row-link" data-finding-row="${i}" role="button" tabindex="0" aria-expanded="false">
-        <td>${badge(f.severity || "unknown", `severity-${f.severity || "unknown"}`)}</td>
+        <td>${findingsSeverityPill(f.severity || "unknown")}</td>
         <td><span class="cell-link mono"><span class="cell-link-caret" aria-hidden="true">&#9656;</span>${escapeHTML(f.rule_id)}</span><br /><span class="muted">${escapeHTML(f.title || "")}</span></td>
         <td><span class="cell-link mono">${escapeHTML(formatSessionID(f.session_id, "-"))}</span></td>
         <td>${escapeHTML(f.reason || "")}</td>
